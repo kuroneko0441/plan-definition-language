@@ -163,6 +163,15 @@ class ExampleTest(unittest.TestCase):
             ),
         )
 
+    def test_ordered_gates_of_another_tool_pass_with_the_same_core(self):
+        self.assertEqual(example_kinds("slack_apps_gates.pdl"), Counter())
+
+    def test_code_acquisition_leaves_unstated_events_and_two_structures_open(self):
+        self.assertEqual(
+            example_kinds("partner_codes.pdl"),
+            Counter({"UNHANDLED": 6, "UNKNOWN_STRUCTURE": 2}),
+        )
+
     def test_documented_issue_transitions_leave_user_set_states_open(self):
         kinds = example_kinds("issue_tracker.pdl")
         self.assertEqual(kinds["UNREACHABLE"], 2)

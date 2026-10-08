@@ -4,6 +4,7 @@ from itertools import product
 
 from .checks import Finding, Index, triple_outcomes
 from .model import Module, Reference, Term
+from .prose import Names, sentence
 
 LABELS = {
     "ko": {
@@ -99,32 +100,23 @@ def term_text(term: Term) -> str:
     return f"{term.function}({term_text(term.argument)})"
 
 
-def render_permissions(module: Module, index: Index, labels: dict[str, str]) -> list[str]:
+def render_permissions(
+    module: Module, index: Index, labels: dict[str, str], names: Names, language: str
+) -> list[str]:
     if not module.rules:
         return []
     lines = [f"## {labels['rules']}", ""]
-    rows = [
-        [
-            labels[rule.effect],
-            rule.actor,
-            rule.action,
-            rule.resource,
-            " and ".join(f"{c.variable}={c.value}" for c in rule.conditions),
-            rule.requires,
-            rule.why,
-        ]
-        for rule in module.rules
-    ]
-    lines += table(
-        [labels[key] for key in ("effect", "actor", "action", "resource", "condition", "requires", "why")],
-        rows,
-    )
+    for rule in module.rules:
+        lines.append(f"- {sentence(rule, names, language)}")
+        if rule.why:
+            lines.append(f"  - {labels['why']}: {rule.why}")
+    lines.append("")
     pairs = list(product(sorted(index.actions), sorted(index.guarded_resources)))
     if pairs and index.internal_actors:
         lines += [f"### {labels['matrix']}", ""]
         matrix = []
         for actor in sorted(index.internal_actors):
-            row = [actor]
+            row = [names.show(actor)]
             for action, resource in pairs:
                 outcomes = triple_outcomes(module, index, actor, action, resource) or []
                 effects = {frozenset(rule.effect for rule in outcome.rules) for outcome in outcomes}
@@ -135,7 +127,8 @@ def render_permissions(module: Module, index: Index, labels: dict[str, str]) -> 
                 else:
                     row.append(labels["conditional"])
             matrix.append(row)
-        lines += table([labels["actor"]] + [f"{a} {r}" for a, r in pairs], matrix)
+        headers = [labels["actor"]] + [f"{names.show(a)} {names.show(r)}" for a, r in pairs]
+        lines += table(headers, matrix)
     return lines
 
 
@@ -166,6 +159,11 @@ def render_machines(module: Module, labels: dict[str, str]) -> list[str]:
 def render(module: Module, findings: list[Finding], language: str = "ko") -> str:
     labels = LABELS[language]
     index = Index(module)
+    names = Names(module, language)
+
+    def titled(name: str) -> str:
+        return f"{names.show(name)} ({name})" if names.show(name) != name else name
+
     lines = [f"# {module.name}", ""]
     unverified = [finding for finding in findings if finding.kind == "UNVERIFIED"]
     if unverified:
@@ -180,26 +178,33 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
         lines += [f"## {labels['enums']}", ""]
         lines += table(
             [labels["name"], labels["values"], labels["why"]],
-            [[e.name, ", ".join(e.values), e.why] for e in module.enums],
+            [
+                [
+                    titled(e.name),
+                    ", ".join(f"{v} ({e.value_labels[v]})" if v in e.value_labels else v for v in e.values),
+                    e.why,
+                ]
+                for e in module.enums
+            ],
         )
     if module.entities:
         lines += [f"## {labels['entities']}", ""]
         lines += table(
             [labels["name"], labels["key"], labels["fields"], labels["why"]],
             [
-                [e.name, ", ".join(e.key), ", ".join(f"{n}: {t}" for n, t in e.fields), e.why]
+                [titled(e.name), ", ".join(e.key), ", ".join(f"{n}: {t}" for n, t in e.fields), e.why]
                 for e in module.entities
             ],
         )
-        passive = [e.name for e in module.entities if e.passive]
+        passive = [names.show(e.name) for e in module.entities if e.passive]
         if passive:
             lines += [f"- {labels['passive']}: {', '.join(passive)}", ""]
-    lines += render_permissions(module, index, labels)
+    lines += render_permissions(module, index, labels, names, language)
     lines += render_machines(module, labels)
     if module.laws:
         lines += [f"## {labels['laws']}", ""]
-        lines += table(
-            [labels["law"], labels["condition"], labels["why"]],
-            [[l.identifier, f"{term_text(l.left)} {l.operator} {term_text(l.right)}", l.why] for l in module.laws],
-        )
+        for law in module.laws:
+            formula = f"{term_text(law.left)} {law.operator} {term_text(law.right)}"
+            lines.append(f"- {law.why or law.identifier} (`{formula}`)")
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"

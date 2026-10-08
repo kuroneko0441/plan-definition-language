@@ -16,6 +16,8 @@ class EnumDefinition:
     name: str
     values: list[str]
     why: str = ""
+    label: str = ""
+    value_labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -26,6 +28,7 @@ class EntityDefinition:
     passive: bool
     fields: list[tuple[str, str]]
     why: str = ""
+    label: str = ""
 
 
 @dataclass
@@ -33,6 +36,7 @@ class Declaration:
     line: int
     kind: str
     name: str
+    label: str = ""
 
 
 @dataclass

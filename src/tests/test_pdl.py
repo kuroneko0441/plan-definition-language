@@ -187,9 +187,23 @@ class RenderTest(unittest.TestCase):
     def test_permission_matrix_and_rationale_are_rendered(self):
         document = self.render_example("edi_row_rules.pdl")
         self.assertIn("## 권한 규칙", document)
-        self.assertIn("| EdiTeam | 조건부 | 허용 |", document)
+        self.assertIn("| EDI팀 | 조건부 | 허용 |", document)
         self.assertIn("정산된 행은 수정할 수 없다.", document)
-        self.assertIn("권한 규칙 범위 밖 엔티티: Reason, EdiSubmission", document)
+        self.assertIn("권한 규칙 범위 밖 엔티티: 수정 사유, EDI 제출", document)
+
+    def test_rules_become_korean_sentences_with_the_right_particles(self):
+        document = self.render_example("edi_row_rules.pdl")
+        self.assertIn("- 누구나 EDI 행을 조회할 수 있다.", document)
+        self.assertIn("- 행 상태가 '입력'일 때, EDI팀은 EDI 행을 수정할 수 있다.", document)
+        self.assertIn(
+            "- 행 상태가 '제약사 마감 후 제출'일 때, EDI팀은 EDI 행을 수정할 수 있다. 이때 수정 사유를 입력해야 한다.",
+            document,
+        )
+        self.assertIn("- 행 상태가 '정산'일 때, 누구도 EDI 행을 수정할 수 없다.", document)
+
+    def test_rules_become_english_sentences(self):
+        document = self.render_example("edi_row_rules.pdl", "en")
+        self.assertIn("- Anyone may View EdiRow.", document)
 
     def test_time_rule_is_rendered(self):
         document = self.render_example("edi_row_rules.pdl", "en")

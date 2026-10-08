@@ -122,6 +122,9 @@ class Parser:
     def why(self) -> str:
         return self.string() if self.accept("why") else ""
 
+    def label(self) -> str:
+        return self.string() if self.accept("label") else ""
+
     def condition(self) -> Condition:
         variable = self.word()
         self.expect("=")
@@ -154,16 +157,25 @@ class Parser:
     def enum(self, module: Module) -> None:
         line = self.expect("enum").line
         name = self.word()
+        label = self.label()
         self.expect("=")
-        values = [self.word()]
-        while self.accept("|"):
-            values.append(self.word())
-        module.enums.append(EnumDefinition(line, name, values, self.why()))
+        values: list[str] = []
+        value_labels: dict[str, str] = {}
+        while True:
+            value = self.word()
+            values.append(value)
+            following = self.peek()
+            if following is not None and following.kind == "string":
+                value_labels[value] = self.string()
+            if not self.accept("|"):
+                break
+        module.enums.append(EnumDefinition(line, name, values, self.why(), label, value_labels))
         module.definitions.append(("enum", name, line))
 
     def entity(self, module: Module) -> None:
         line = self.expect("entity").line
         name = self.word()
+        label = self.label()
         key: list[str] = []
         if self.accept("key"):
             self.expect("(")
@@ -177,14 +189,19 @@ class Parser:
                 self.expect(":")
                 fields.append((field_name, self.word()))
                 self.accept(",")
-        module.entities.append(EntityDefinition(line, name, key, passive, fields, self.why()))
+        module.entities.append(
+            EntityDefinition(line, name, key, passive, fields, self.why(), label)
+        )
         module.definitions.append(("entity", name, line))
 
     def declaration(self, module: Module) -> None:
         token = self.advance()
-        for name in self.comma_words():
-            module.declarations.append(Declaration(token.line, token.value, name))
+        while True:
+            name = self.word()
+            module.declarations.append(Declaration(token.line, token.value, name, self.label()))
             module.definitions.append((token.value, name, token.line))
+            if not self.accept(","):
+                break
 
     def rule(self, module: Module) -> None:
         token = self.advance()

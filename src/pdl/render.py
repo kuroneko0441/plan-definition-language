@@ -1,0 +1,205 @@
+"""Markdown rendering of a hole-free module."""
+
+from itertools import product
+
+from .checks import Finding, Index, triple_outcomes
+from .model import Module, Reference, Term
+
+LABELS = {
+    "ko": {
+        "unverified": "미검증 임시 결정",
+        "enums": "열거형",
+        "entities": "엔티티",
+        "name": "이름",
+        "key": "유일성 키",
+        "fields": "필드",
+        "values": "값",
+        "passive": "권한 규칙 범위 밖 엔티티",
+        "rules": "권한 규칙",
+        "matrix": "권한 요약",
+        "machines": "상태 머신",
+        "scenarios": "시나리오",
+        "laws": "시간 규칙",
+        "effect": "구분",
+        "actor": "주체",
+        "action": "동작",
+        "resource": "대상",
+        "condition": "조건",
+        "requires": "필요 항목",
+        "why": "근거",
+        "permit": "허용",
+        "forbid": "금지",
+        "conditional": "조건부",
+        "state": "상태",
+        "event": "사건",
+        "from": "출발",
+        "to": "도착",
+        "source": "출처",
+        "provisional": "임시 값",
+        "terminal": "종결 상태",
+        "start": "시작",
+        "events": "사건 순서",
+        "expect": "기대 상태",
+        "law": "규칙",
+        "any": "조건 없음",
+    },
+    "en": {
+        "unverified": "Unverified provisional decisions",
+        "enums": "Enumerations",
+        "entities": "Entities",
+        "name": "Name",
+        "key": "Unique key",
+        "fields": "Fields",
+        "values": "Values",
+        "passive": "Entities outside permission rules",
+        "rules": "Permission rules",
+        "matrix": "Permission summary",
+        "machines": "State machines",
+        "scenarios": "Scenarios",
+        "laws": "Time rules",
+        "effect": "Effect",
+        "actor": "Actor",
+        "action": "Action",
+        "resource": "Resource",
+        "condition": "Condition",
+        "requires": "Requires",
+        "why": "Rationale",
+        "permit": "Permit",
+        "forbid": "Forbid",
+        "conditional": "Conditional",
+        "state": "State",
+        "event": "Event",
+        "from": "From",
+        "to": "To",
+        "source": "Source",
+        "provisional": "Provisional value",
+        "terminal": "Terminal states",
+        "start": "Start",
+        "events": "Event sequence",
+        "expect": "Expected state",
+        "law": "Rule",
+        "any": "Any",
+    },
+}
+
+
+def cell(text: str) -> str:
+    return text.replace("|", "\\|").replace("\n", " ") or " "
+
+
+def table(headers: list[str], rows: list[list[str]]) -> list[str]:
+    lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
+    lines += ["| " + " | ".join(cell(value) for value in row) + " |" for row in rows]
+    return lines + [""]
+
+
+def term_text(term: Term) -> str:
+    if isinstance(term, Reference):
+        return f"{term.entity}.{term.attribute}"
+    return f"{term.function}({term_text(term.argument)})"
+
+
+def render_permissions(module: Module, index: Index, labels: dict[str, str]) -> list[str]:
+    if not module.rules:
+        return []
+    lines = [f"## {labels['rules']}", ""]
+    rows = [
+        [
+            labels[rule.effect],
+            rule.actor,
+            rule.action,
+            rule.resource,
+            " and ".join(f"{c.variable}={c.value}" for c in rule.conditions),
+            rule.requires,
+            rule.why,
+        ]
+        for rule in module.rules
+    ]
+    lines += table(
+        [labels[key] for key in ("effect", "actor", "action", "resource", "condition", "requires", "why")],
+        rows,
+    )
+    pairs = list(product(sorted(index.actions), sorted(index.guarded_resources)))
+    if pairs and index.internal_actors:
+        lines += [f"### {labels['matrix']}", ""]
+        matrix = []
+        for actor in sorted(index.internal_actors):
+            row = [actor]
+            for action, resource in pairs:
+                outcomes = triple_outcomes(module, index, actor, action, resource) or []
+                effects = {frozenset(rule.effect for rule in outcome.rules) for outcome in outcomes}
+                if effects == {frozenset({"permit"})}:
+                    row.append(labels["permit"])
+                elif effects == {frozenset({"forbid"})}:
+                    row.append(labels["forbid"])
+                else:
+                    row.append(labels["conditional"])
+            matrix.append(row)
+        lines += table([labels["actor"]] + [f"{a} {r}" for a, r in pairs], matrix)
+    return lines
+
+
+def render_machines(module: Module, labels: dict[str, str]) -> list[str]:
+    lines = []
+    for machine in module.machines:
+        lines += [f"## {labels['machines']}: {machine.name}", "", "```mermaid", "stateDiagram-v2"]
+        lines.append(f"    [*] --> {machine.initial}")
+        for transition in machine.transitions:
+            actor = f" ({transition.actor})" if transition.actor else ""
+            lines.append(f"    {transition.source} --> {transition.target}: {transition.event}{actor}")
+        lines += [f"    {terminal} --> [*]" for terminal in machine.terminals]
+        lines += ["```", ""]
+        rows = [[t.source, t.event, t.target, t.actor, t.why] for t in machine.transitions]
+        lines += table([labels[key] for key in ("from", "event", "to", "actor", "why")], rows)
+    for scenario in module.scenarios:
+        lines += [
+            f"### {labels['scenarios']}: {scenario.name}",
+            "",
+            f"- {labels['start']}: {scenario.start}",
+            f"- {labels['events']}: {', '.join(scenario.events)}",
+            f"- {labels['expect']}: {scenario.expect}",
+            "",
+        ]
+    return lines
+
+
+def render(module: Module, findings: list[Finding], language: str = "ko") -> str:
+    labels = LABELS[language]
+    index = Index(module)
+    lines = [f"# {module.name}", ""]
+    unverified = [finding for finding in findings if finding.kind == "UNVERIFIED"]
+    if unverified:
+        lines += [f"## {labels['unverified']}", ""]
+        rows = [
+            [u.identifier, u.attributes.get("provisional", ""), u.attributes.get("source", "")]
+            for u in module.unknowns
+            if u.policy == "value" and u.attributes.get("verified") != "yes"
+        ]
+        lines += table([labels["name"], labels["provisional"], labels["source"]], rows)
+    if module.enums:
+        lines += [f"## {labels['enums']}", ""]
+        lines += table(
+            [labels["name"], labels["values"], labels["why"]],
+            [[e.name, ", ".join(e.values), e.why] for e in module.enums],
+        )
+    if module.entities:
+        lines += [f"## {labels['entities']}", ""]
+        lines += table(
+            [labels["name"], labels["key"], labels["fields"], labels["why"]],
+            [
+                [e.name, ", ".join(e.key), ", ".join(f"{n}: {t}" for n, t in e.fields), e.why]
+                for e in module.entities
+            ],
+        )
+        passive = [e.name for e in module.entities if e.passive]
+        if passive:
+            lines += [f"- {labels['passive']}: {', '.join(passive)}", ""]
+    lines += render_permissions(module, index, labels)
+    lines += render_machines(module, labels)
+    if module.laws:
+        lines += [f"## {labels['laws']}", ""]
+        lines += table(
+            [labels["law"], labels["condition"], labels["why"]],
+            [[l.identifier, f"{term_text(l.left)} {l.operator} {term_text(l.right)}", l.why] for l in module.laws],
+        )
+    return "\n".join(lines).rstrip() + "\n"

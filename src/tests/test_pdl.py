@@ -172,6 +172,12 @@ class ExampleTest(unittest.TestCase):
             Counter({"UNHANDLED": 6, "UNKNOWN_STRUCTURE": 2}),
         )
 
+    def test_settlement_comparison_is_silent_about_changes_after_a_full_match(self):
+        self.assertEqual(
+            example_kinds("settlement_comparison.pdl"),
+            Counter({"UNHANDLED": 1, "UNKNOWN_STRUCTURE": 1}),
+        )
+
     def test_documented_issue_transitions_leave_user_set_states_open(self):
         kinds = example_kinds("issue_tracker.pdl")
         self.assertEqual(kinds["UNREACHABLE"], 2)

@@ -29,6 +29,15 @@ class EntityDefinition:
     fields: list[tuple[str, str]]
     why: str = ""
     label: str = ""
+    field_notes: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class TermDefinition:
+    line: int
+    name: str
+    why: str = ""
+    label: str = ""
 
 
 @dataclass
@@ -37,6 +46,8 @@ class Declaration:
     kind: str
     name: str
     label: str = ""
+    performed_by: list[str] = field(default_factory=list)
+    applies_to: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -135,6 +146,7 @@ class Law:
 class Module:
     name: str
     definitions: list[tuple[str, str, int]] = field(default_factory=list)
+    terms: list[TermDefinition] = field(default_factory=list)
     enums: list[EnumDefinition] = field(default_factory=list)
     entities: list[EntityDefinition] = field(default_factory=list)
     declarations: list[Declaration] = field(default_factory=list)

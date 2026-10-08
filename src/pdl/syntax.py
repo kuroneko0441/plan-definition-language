@@ -18,6 +18,7 @@ from .model import (
     Rule,
     Scenario,
     Term,
+    TermDefinition,
     Transition,
     Unknown,
 )
@@ -125,6 +126,12 @@ class Parser:
     def label(self) -> str:
         return self.string() if self.accept("label") else ""
 
+    def parenthesized_words(self) -> list[str]:
+        self.expect("(")
+        words = self.comma_words()
+        self.expect(")")
+        return words
+
     def condition(self) -> Condition:
         variable = self.word()
         self.expect("=")
@@ -134,6 +141,7 @@ class Parser:
         self.expect("module")
         module = Module(name=self.word())
         statements = {
+            "term": self.glossary,
             "enum": self.enum,
             "entity": self.entity,
             "actor": self.declaration,
@@ -153,6 +161,13 @@ class Parser:
                 raise PdlSyntaxError(token.line, f"unexpected {token.value!r}")
             handler(module)
         return module
+
+    def glossary(self, module: Module) -> None:
+        line = self.expect("term").line
+        name = self.word()
+        label = self.label()
+        module.terms.append(TermDefinition(line, name, self.why(), label))
+        module.definitions.append(("term", name, line))
 
     def enum(self, module: Module) -> None:
         line = self.expect("enum").line
@@ -183,14 +198,18 @@ class Parser:
             self.expect(")")
         passive = self.accept("passive")
         fields: list[tuple[str, str]] = []
+        field_notes: dict[str, str] = {}
         if self.accept("{"):
             while not self.accept("}"):
                 field_name = self.word()
                 self.expect(":")
                 fields.append((field_name, self.word()))
+                note = self.why()
+                if note:
+                    field_notes[field_name] = note
                 self.accept(",")
         module.entities.append(
-            EntityDefinition(line, name, key, passive, fields, self.why(), label)
+            EntityDefinition(line, name, key, passive, fields, self.why(), label, field_notes)
         )
         module.definitions.append(("entity", name, line))
 
@@ -198,7 +217,15 @@ class Parser:
         token = self.advance()
         while True:
             name = self.word()
-            module.declarations.append(Declaration(token.line, token.value, name, self.label()))
+            declaration = Declaration(token.line, token.value, name, self.label())
+            while token.value == "action":
+                if self.accept("by"):
+                    declaration.performed_by = self.parenthesized_words()
+                elif self.accept("on"):
+                    declaration.applies_to = self.parenthesized_words()
+                else:
+                    break
+            module.declarations.append(declaration)
             module.definitions.append((token.value, name, token.line))
             if not self.accept(","):
                 break

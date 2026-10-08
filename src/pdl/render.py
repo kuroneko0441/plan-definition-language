@@ -9,6 +9,7 @@ from .prose import Names, sentence
 LABELS = {
     "ko": {
         "unverified": "미검증 임시 결정",
+        "terms": "용어",
         "enums": "열거형",
         "entities": "엔티티",
         "name": "이름",
@@ -46,6 +47,7 @@ LABELS = {
     },
     "en": {
         "unverified": "Unverified provisional decisions",
+        "terms": "Terms",
         "enums": "Enumerations",
         "entities": "Entities",
         "name": "Name",
@@ -111,13 +113,20 @@ def render_permissions(
         if rule.why:
             lines.append(f"  - {labels['why']}: {rule.why}")
     lines.append("")
-    pairs = list(product(sorted(index.actions), sorted(index.guarded_resources)))
+    pairs = [
+        (action, resource)
+        for action, resource in product(sorted(index.actions), sorted(index.guarded_resources))
+        if any(index.applies(action, actor, resource) for actor in index.internal_actors)
+    ]
     if pairs and index.internal_actors:
         lines += [f"### {labels['matrix']}", ""]
         matrix = []
         for actor in sorted(index.internal_actors):
             row = [names.show(actor)]
             for action, resource in pairs:
+                if not index.applies(action, actor, resource):
+                    row.append("-")
+                    continue
                 outcomes = triple_outcomes(module, index, actor, action, resource) or []
                 effects = {frozenset(rule.effect for rule in outcome.rules) for outcome in outcomes}
                 if effects == {frozenset({"permit"})}:
@@ -174,6 +183,10 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
             if u.policy == "value" and u.attributes.get("verified") != "yes"
         ]
         lines += table([labels["name"], labels["provisional"], labels["source"]], rows)
+    if module.terms:
+        lines += [f"## {labels['terms']}", ""]
+        lines += [f"- {names.show(term.name)}: {term.why}" for term in module.terms]
+        lines.append("")
     if module.enums:
         lines += [f"## {labels['enums']}", ""]
         lines += table(
@@ -192,7 +205,15 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
         lines += table(
             [labels["name"], labels["key"], labels["fields"], labels["why"]],
             [
-                [titled(e.name), ", ".join(e.key), ", ".join(f"{n}: {t}" for n, t in e.fields), e.why]
+                [
+                    titled(e.name),
+                    ", ".join(e.key),
+                    "<br>".join(
+                        f"{n}: {t}" + (f" - {e.field_notes[n]}" if n in e.field_notes else "")
+                        for n, t in e.fields
+                    ),
+                    e.why,
+                ]
                 for e in module.entities
             ],
         )

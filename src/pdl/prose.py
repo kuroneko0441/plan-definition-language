@@ -22,6 +22,9 @@ class Names:
         for enum in module.enums:
             if enum.label:
                 self.labels[enum.name] = enum.label
+        for term in module.terms:
+            if term.label:
+                self.labels[term.name] = term.label
         self.value_labels = {
             (enum.name, value): label
             for enum in module.enums

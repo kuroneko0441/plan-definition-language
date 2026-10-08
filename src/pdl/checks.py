@@ -45,6 +45,14 @@ class Index:
         self.guarded_resources = {
             name for name, entity in self.entities.items() if not entity.passive
         }
+        actions = [d for d in module.declarations if d.kind == "action"]
+        self.action_actors = {d.name: set(d.performed_by) for d in actions if d.performed_by}
+        self.action_resources = {d.name: set(d.applies_to) for d in actions if d.applies_to}
+
+    def applies(self, action: str, actor: str, resource: str) -> bool:
+        return actor in self.action_actors.get(action, {actor}) and resource in self.action_resources.get(
+            action, {resource}
+        )
 
 
 def describe(assignment: dict[str, str]) -> str:
@@ -105,6 +113,7 @@ def check(module: Module) -> list[Finding]:
     for step in (
         check_definitions,
         check_entities,
+        check_actions,
         check_rules,
         check_permissions,
         check_machines,
@@ -164,9 +173,32 @@ def check_condition(condition: Condition, index: Index, line: int) -> list[Findi
     return []
 
 
+def check_actions(module: Module, index: Index) -> list[Finding]:
+    findings = []
+    for declaration in module.declarations:
+        for kind, names, known in (
+            ("actor", declaration.performed_by, index.actors),
+            ("entity", declaration.applies_to, set(index.entities)),
+        ):
+            for name in names:
+                if name not in known:
+                    findings.append(
+                        Finding("UNDEFINED", f"{kind} {name} of action {declaration.name} is not defined", declaration.line)
+                    )
+    return findings
+
+
 def check_rules(module: Module, index: Index) -> list[Finding]:
     findings = []
     for rule in module.rules:
+        for kind, value, allowed in (
+            ("actor", rule.actor, index.action_actors.get(rule.action)),
+            ("resource", rule.resource, index.action_resources.get(rule.action)),
+        ):
+            if allowed is not None and value != "*" and value not in allowed:
+                findings.append(
+                    Finding("INAPPLICABLE", f"action {rule.action} does not apply to {kind} {value}", rule.line)
+                )
         references = (
             ("actor", rule.actor, index.actors),
             ("action", rule.action, index.actions),
@@ -193,6 +225,8 @@ def check_permissions(module: Module, index: Index) -> list[Finding]:
         sorted(index.internal_actors), sorted(index.actions), sorted(index.guarded_resources)
     )
     for actor, action, resource in triples:
+        if not index.applies(action, actor, resource):
+            continue
         outcomes = triple_outcomes(module, index, actor, action, resource)
         label = f"{actor} {action} {resource}"
         if outcomes is None:

@@ -105,6 +105,22 @@ class SeededHoleTest(unittest.TestCase):
         )
         self.assertEqual(blocking_kinds(text), Counter())
 
+    def test_action_scope_limits_the_required_combinations(self):
+        text = "module m\nactor X, Y\naction Do by (X) on (R)\nentity R\npermit X Do R"
+        self.assertEqual(blocking_kinds(text), Counter())
+
+    def test_rule_outside_the_action_scope_is_inapplicable(self):
+        text = "module m\nactor X, Y\naction Do by (X) on (R)\nentity R\npermit X Do R\npermit Y Do R"
+        self.assertEqual(blocking_kinds(text), Counter({"INAPPLICABLE": 1}))
+
+    def test_action_scope_with_undefined_names(self):
+        text = "module m\nactor X\naction Do by (Nobody) on (Nothing)"
+        self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 2}))
+
+    def test_term_name_cannot_repeat_an_action_name(self):
+        text = "module m\nterm Do why \"x\"\naction Do"
+        self.assertEqual(blocking_kinds(text), Counter({"DUPLICATE": 1}))
+
     def test_syntax_error_reports_the_line(self):
         with self.assertRaises(PdlSyntaxError) as raised:
             parse_module("module m\nenum E A")
@@ -193,23 +209,32 @@ class RenderTest(unittest.TestCase):
     def test_permission_matrix_and_rationale_are_rendered(self):
         document = self.render_example("edi_row_rules.pdl")
         self.assertIn("## 권한 규칙", document)
-        self.assertIn("| EDI팀 | 조건부 | 허용 |", document)
+        self.assertIn("| 딜러 | - | - | - | 조건부 |", document)
+        self.assertIn("| EDI팀 | 조건부 | 허용 | 허용 | - |", document)
         self.assertIn("정산된 행은 수정할 수 없다.", document)
-        self.assertIn("권한 규칙 범위 밖 엔티티: 수정 사유, EDI 제출", document)
+        self.assertIn("권한 규칙 범위 밖 엔티티: 제약사, 수정 사유", document)
+
+    def test_terms_and_field_notes_are_rendered(self):
+        document = self.render_example("edi_row_rules.pdl")
+        self.assertIn("- 처방월: 처방이 발생한 달이다.", document)
+        self.assertIn("- 업로드: 딜러가 이음에 EDI를 올리는 행위다.", document)
+        self.assertIn("- 제약사 마감: 제약사 전산이 더 이상 제출과 수정을 받지 않는 시점이며", document)
+        self.assertIn("settlement_month: Month - 제약사가 정산하는 달이다.", document)
 
     def test_rules_become_korean_sentences_with_the_right_particles(self):
         document = self.render_example("edi_row_rules.pdl")
-        self.assertIn("- 누구나 EDI 행을 조회할 수 있다.", document)
+        self.assertIn("- 업로드 상태가 '열림'일 때, 딜러는 EDI 제출을 업로드할 수 있다.", document)
+        self.assertIn("- EDI팀은 EDI 제출을 대리 등록할 수 있다.", document)
         self.assertIn("- 행 상태가 '입력'일 때, EDI팀은 EDI 행을 수정할 수 있다.", document)
         self.assertIn(
-            "- 행 상태가 '제약사 마감 후 제출'일 때, EDI팀은 EDI 행을 수정할 수 있다. 이때 수정 사유를 입력해야 한다.",
+            "- 행 상태가 '제약사 마감 완료'일 때, EDI팀은 EDI 행을 수정할 수 있다. 이때 수정 사유를 입력해야 한다.",
             document,
         )
-        self.assertIn("- 행 상태가 '정산'일 때, 누구도 EDI 행을 수정할 수 없다.", document)
+        self.assertIn("- 행 상태가 '정산 완료'일 때, 누구도 EDI 행을 수정할 수 없다.", document)
 
     def test_rules_become_english_sentences(self):
         document = self.render_example("edi_row_rules.pdl", "en")
-        self.assertIn("- Anyone may View EdiRow.", document)
+        self.assertIn("- When UploadWindow is Open, Dealer may UploadEdi EdiSubmission.", document)
 
     def test_time_rule_is_rendered(self):
         document = self.render_example("edi_row_rules.pdl", "en")

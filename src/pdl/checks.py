@@ -4,7 +4,23 @@ from collections import deque
 from dataclasses import dataclass
 from itertools import product
 
-from .model import Call, Condition, Exclusion, Machine, Module, Reference, Rule, Term
+from .model import (
+    And,
+    Atom,
+    Call,
+    Condition,
+    ForAll,
+    Formula,
+    Implies,
+    InSet,
+    Machine,
+    Module,
+    Not,
+    Or,
+    Reference,
+    Rule,
+    Term,
+)
 
 TIME_TYPES = ("Day", "Week", "Month")
 BUILTIN_TYPES = ("Text", "Int", "Bool", "Timestamp") + TIME_TYPES
@@ -49,6 +65,13 @@ class Index:
         actions = [d for d in module.declarations if d.kind == "action"]
         self.action_actors = {d.name: set(d.performed_by) for d in actions if d.performed_by}
         self.action_resources = {d.name: set(d.applies_to) for d in actions if d.applies_to}
+        formulas = [invariant.formula for invariant in module.invariants]
+        for exclusion in module.exclusions:
+            both = [
+                Atom(c.variable, "=", c.value) for c in (exclusion.left, exclusion.right)
+            ]
+            formulas.append(Not(And(both)))
+        self.invariant_terms = [(formula, free_enums(formula, self)) for formula in formulas]
 
     def applies(self, action: str, actor: str, resource: str) -> bool:
         return actor in self.action_actors.get(action, {actor}) and resource in self.action_resources.get(
@@ -69,25 +92,67 @@ def rule_matches(rule: Rule, actor: str, action: str, resource: str) -> bool:
     )
 
 
-def is_excluded(exclusion: Exclusion, assignment: dict[str, str]) -> bool:
-    def holds(condition: Condition) -> bool:
-        return assignment.get(condition.variable) == condition.value
+def resolve(term: str, assignment: dict[str, str], bound: dict[str, str]) -> str:
+    if term in bound:
+        return bound[term]
+    return assignment.get(term, term)
 
-    return holds(exclusion.left) and holds(exclusion.right)
+
+def evaluate(formula: Formula, assignment: dict[str, str], bound: dict[str, str], index: Index) -> bool:
+    if isinstance(formula, Atom):
+        equal = resolve(formula.left, assignment, bound) == resolve(formula.right, assignment, bound)
+        return equal if formula.operator == "=" else not equal
+    if isinstance(formula, InSet):
+        return resolve(formula.left, assignment, bound) in formula.values
+    if isinstance(formula, Not):
+        return not evaluate(formula.operand, assignment, bound, index)
+    if isinstance(formula, And):
+        return all(evaluate(operand, assignment, bound, index) for operand in formula.operands)
+    if isinstance(formula, Or):
+        return any(evaluate(operand, assignment, bound, index) for operand in formula.operands)
+    if isinstance(formula, Implies):
+        return not evaluate(formula.premise, assignment, bound, index) or evaluate(
+            formula.conclusion, assignment, bound, index
+        )
+    enum = index.enums.get(formula.enum)
+    values = enum.values if enum is not None else []
+    return all(evaluate(formula.body, assignment, {**bound, formula.variable: v}, index) for v in values)
+
+
+def free_enums(formula: Formula, index: Index, bound: frozenset[str] = frozenset()) -> set[str]:
+    if isinstance(formula, Atom):
+        terms = [formula.left, formula.right]
+    elif isinstance(formula, InSet):
+        terms = [formula.left]
+    elif isinstance(formula, Not):
+        return free_enums(formula.operand, index, bound)
+    elif isinstance(formula, (And, Or)):
+        return set().union(*(free_enums(operand, index, bound) for operand in formula.operands))
+    elif isinstance(formula, Implies):
+        return free_enums(formula.premise, index, bound) | free_enums(formula.conclusion, index, bound)
+    else:
+        return free_enums(formula.body, index, bound | {formula.variable})
+    return {term for term in terms if term in index.enums and term not in bound}
 
 
 def triple_outcomes(
     module: Module, index: Index, actor: str, action: str, resource: str
 ) -> list[Outcome] | None:
     matching = [rule for rule in module.rules if rule_matches(rule, actor, action, resource)]
-    variables = sorted(
-        {
-            condition.variable
-            for rule in matching
-            for condition in rule.conditions
-            if condition.variable in index.enums
-        }
-    )
+    chosen = {
+        condition.variable
+        for rule in matching
+        for condition in rule.conditions
+        if condition.variable in index.enums
+    }
+    changed = True
+    while changed:
+        changed = False
+        for _, enums in index.invariant_terms:
+            if enums & chosen and not enums <= chosen:
+                chosen |= enums
+                changed = True
+    variables = sorted(chosen)
     domains = [index.enums[variable].values for variable in variables]
     size = 1
     for domain in domains:
@@ -97,7 +162,11 @@ def triple_outcomes(
     outcomes = []
     for values in product(*domains):
         assignment = dict(zip(variables, values))
-        if any(is_excluded(exclusion, assignment) for exclusion in module.exclusions):
+        if not all(
+            evaluate(formula, assignment, {}, index)
+            for formula, enums in index.invariant_terms
+            if enums and enums <= chosen
+        ):
             continue
         applicable = [
             rule
@@ -114,6 +183,7 @@ def check(module: Module) -> list[Finding]:
     for step in (
         check_definitions,
         check_entities,
+        check_invariants,
         check_views,
         check_actions,
         check_rules,
@@ -173,6 +243,74 @@ def row_entities(module: Module, entity: str, source: str) -> list[str]:
         if any(type_name == entity for _, type_name in candidate.fields)
         and any(type_name == source for _, type_name in candidate.fields)
     ]
+
+
+def term_enum(term: str, bound: dict[str, str], index: Index) -> str | None:
+    if term in bound:
+        return bound[term]
+    return term if term in index.enums else None
+
+
+def check_formula(
+    formula: Formula, bound: dict[str, str], index: Index, line: int, findings: list[Finding]
+) -> None:
+    if isinstance(formula, Atom):
+        left = term_enum(formula.left, bound, index)
+        right = term_enum(formula.right, bound, index)
+        if left is None and right is None:
+            findings.append(
+                Finding("UNDEFINED", f"neither {formula.left} nor {formula.right} is an enum or a bound variable", line)
+            )
+        elif left is not None and right is not None and left != right:
+            findings.append(Finding("UNIT_MISMATCH", f"{formula.left} and {formula.right} are values of different enums", line))
+        elif left is None and formula.left not in index.enums[right].values:
+            findings.append(Finding("UNDEFINED", f"{formula.left} is not a value of {right}", line))
+        elif right is None and formula.right not in index.enums[left].values:
+            findings.append(Finding("UNDEFINED", f"{formula.right} is not a value of {left}", line))
+    elif isinstance(formula, InSet):
+        enum = term_enum(formula.left, bound, index)
+        if enum is None:
+            findings.append(Finding("UNDEFINED", f"{formula.left} is not an enum or a bound variable", line))
+        else:
+            for value in formula.values:
+                if value not in index.enums[enum].values:
+                    findings.append(Finding("UNDEFINED", f"{value} is not a value of {enum}", line))
+    elif isinstance(formula, Not):
+        check_formula(formula.operand, bound, index, line, findings)
+    elif isinstance(formula, (And, Or)):
+        for operand in formula.operands:
+            check_formula(operand, bound, index, line, findings)
+    elif isinstance(formula, Implies):
+        check_formula(formula.premise, bound, index, line, findings)
+        check_formula(formula.conclusion, bound, index, line, findings)
+    else:
+        if formula.enum not in index.enums:
+            findings.append(Finding("UNDEFINED", f"enum {formula.enum} of the quantifier is not defined", line))
+            return
+        check_formula(formula.body, {**bound, formula.variable: formula.enum}, index, line, findings)
+
+
+def check_invariants(module: Module, index: Index) -> list[Finding]:
+    findings: list[Finding] = []
+    for invariant in module.invariants:
+        check_formula(invariant.formula, {}, index, invariant.line, findings)
+    if findings:
+        return findings
+    enums = sorted(set().union(*(names for _, names in index.invariant_terms)))
+    if not enums:
+        return findings
+    domains = [index.enums[name].values for name in enums]
+    size = 1
+    for domain in domains:
+        size *= len(domain)
+    if size > ENUMERATION_LIMIT:
+        return findings
+    for values in product(*domains):
+        assignment = dict(zip(enums, values))
+        if all(evaluate(formula, assignment, {}, index) for formula, _ in index.invariant_terms):
+            return findings
+    line = module.invariants[0].line if module.invariants else module.exclusions[0].line
+    return [Finding("CONTRADICTION", "the invariants and exclusions admit no combination of values", line)]
 
 
 def check_views(module: Module, index: Index) -> list[Finding]:

@@ -3,7 +3,20 @@
 from itertools import product
 
 from .checks import Finding, Index, row_entities, triple_outcomes
-from .model import Machine, Module, Reference, Term
+from .model import (
+    And,
+    Atom,
+    ForAll,
+    Formula,
+    Implies,
+    InSet,
+    Machine,
+    Module,
+    Not,
+    Or,
+    Reference,
+    Term,
+)
 from .prose import Names, attach, sentence
 
 LABELS = {
@@ -11,6 +24,7 @@ LABELS = {
         "unverified": "미검증 임시 결정",
         "terms": "용어",
         "derivations": "파생 상태",
+        "invariants": "항상 성립하는 조건",
         "screens": "화면",
         "enums": "열거형",
         "entities": "엔티티",
@@ -55,6 +69,7 @@ LABELS = {
         "unverified": "Unverified provisional decisions",
         "terms": "Terms",
         "derivations": "Derived statuses",
+        "invariants": "Invariants",
         "screens": "Screens",
         "enums": "Enumerations",
         "entities": "Entities",
@@ -106,6 +121,28 @@ def table(headers: list[str], rows: list[list[str]]) -> list[str]:
     lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
     lines += ["| " + " | ".join(cell(value) for value in row) + " |" for row in rows]
     return lines + [""]
+
+
+PRECEDENCE = {Implies: 1, Or: 2, And: 3}
+
+
+def formula_text(formula: Formula, parent: int = 0) -> str:
+    if isinstance(formula, Atom):
+        return f"{formula.left} {'=' if formula.operator == '=' else '≠'} {formula.right}"
+    if isinstance(formula, InSet):
+        return f"{formula.left} ∈ {{{', '.join(formula.values)}}}"
+    if isinstance(formula, Not):
+        return f"¬({formula_text(formula.operand)})"
+    if isinstance(formula, ForAll):
+        text = f"∀ {formula.variable} ∈ {formula.enum} : {formula_text(formula.body)}"
+        return f"({text})" if parent else text
+    level = PRECEDENCE[type(formula)]
+    if isinstance(formula, Implies):
+        text = f"{formula_text(formula.premise, level + 1)} ⇒ {formula_text(formula.conclusion, level)}"
+    else:
+        joiner = " ∧ " if isinstance(formula, And) else " ∨ "
+        text = joiner.join(formula_text(operand, level + 1) for operand in formula.operands)
+    return f"({text})" if parent > level else text
 
 
 def term_text(term: Term) -> str:
@@ -335,5 +372,10 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
         for law in module.laws:
             formula = f"{term_text(law.left)} {law.operator} {term_text(law.right)}"
             lines.append(f"- {law.why or law.identifier} (`{formula}`)")
+        lines.append("")
+    if module.invariants:
+        lines += [f"## {labels['invariants']}", ""]
+        for invariant in module.invariants:
+            lines.append(f"- {invariant.why or invariant.name} (`{formula_text(invariant.formula)}`)")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

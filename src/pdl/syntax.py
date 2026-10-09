@@ -4,6 +4,8 @@ import re
 from typing import NamedTuple
 
 from .model import (
+    And,
+    Atom,
     Call,
     Condition,
     Declaration,
@@ -11,10 +13,17 @@ from .model import (
     EntityDefinition,
     EnumDefinition,
     Exclusion,
+    ForAll,
+    Formula,
     Handling,
+    Implies,
+    InSet,
+    Invariant,
     Law,
     Machine,
     Module,
+    Not,
+    Or,
     Reference,
     Rule,
     Scenario,
@@ -29,10 +38,11 @@ TOKEN_PATTERN = re.compile(
     r"(?P<space>\s+)"
     r"|(?P<comment>#[^\n]*)"
     r"|(?P<string>\"(?:[^\"\\]|\\.)*\")"
-    r"|(?P<symbol>->|→|<=|>=|≤|≥|∧|[{}(),:=|*<>.;])"
+    r"|(?P<symbol>->|→|<=|>=|≤|≥|=>|⇒|!=|≠|∧|∨|¬|∀|∈|[{}(),:=|*<>.;])"
     r"|(?P<word>\w+)"
 )
-SYMBOL_ALIASES = {"→": "->", "≤": "<=", "≥": ">="}
+SYMBOL_ALIASES = {"→": "->", "≤": "<=", "≥": ">=", "⇒": "=>", "≠": "!="}
+WORD_ALIASES = {"∧": "and", "∨": "or", "¬": "not", "∀": "forall", "∈": "in"}
 COMPARISON_OPERATORS = ("=", "<", ">", "<=", ">=")
 
 
@@ -60,8 +70,8 @@ def tokenize(text: str) -> list[Token]:
         value = match.group()
         if kind == "string":
             tokens.append(Token("string", value[1:-1].replace('\\"', '"'), line))
-        elif kind == "symbol" and value == "∧":
-            tokens.append(Token("word", "and", line))
+        elif kind == "symbol" and value in WORD_ALIASES:
+            tokens.append(Token("word", WORD_ALIASES[value], line))
         elif kind == "symbol":
             tokens.append(Token("symbol", SYMBOL_ALIASES.get(value, value), line))
         elif kind == "word":
@@ -165,6 +175,7 @@ class Parser:
             "permit": self.rule,
             "forbid": self.rule,
             "exclusive": self.exclusive,
+            "invariant": self.invariant,
             "machine": self.machine,
             "scenario": self.scenario,
             "unknown": self.unknown,
@@ -305,6 +316,56 @@ class Parser:
         left = self.condition()
         self.expect(",")
         module.exclusions.append(Exclusion(line, left, self.condition()))
+
+    def invariant(self, module: Module) -> None:
+        line = self.expect("invariant").line
+        name = self.word()
+        self.expect(":")
+        formula = self.implication()
+        module.invariants.append(Invariant(line, name, formula, self.why()))
+        module.definitions.append(("invariant", name, line))
+
+    def implication(self) -> Formula:
+        premise = self.disjunction()
+        if self.accept("=>"):
+            return Implies(premise, self.implication())
+        return premise
+
+    def disjunction(self) -> Formula:
+        operands = [self.conjunction()]
+        while self.accept("or"):
+            operands.append(self.conjunction())
+        return operands[0] if len(operands) == 1 else Or(operands)
+
+    def conjunction(self) -> Formula:
+        operands = [self.unary()]
+        while self.accept("and"):
+            operands.append(self.unary())
+        return operands[0] if len(operands) == 1 else And(operands)
+
+    def unary(self) -> Formula:
+        if self.accept("not"):
+            return Not(self.unary())
+        if self.accept("forall"):
+            variable = self.word()
+            self.expect("in")
+            enum = self.word()
+            self.expect(":")
+            return ForAll(variable, enum, self.implication())
+        if self.accept("("):
+            formula = self.implication()
+            self.expect(")")
+            return formula
+        left = self.word()
+        if self.accept("in"):
+            self.expect("{")
+            values = self.comma_words()
+            self.expect("}")
+            return InSet(left, values)
+        token = self.advance()
+        if token.kind == "string" or token.value not in ("=", "!="):
+            raise PdlSyntaxError(token.line, f"expected = or != but found {token.value!r}")
+        return Atom(left, token.value, self.word())
 
     def machine(self, module: Module) -> None:
         line = self.expect("machine").line

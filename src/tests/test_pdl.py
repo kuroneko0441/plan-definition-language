@@ -140,6 +140,41 @@ class SeededHoleTest(unittest.TestCase):
         text = LINKED + "screen V of Parent shows Nothing, Child.nothing"
         self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 2}))
 
+    def test_invariant_removes_the_worlds_that_cause_a_contradiction(self):
+        base = (
+            "module m\nenum S = On | Off\nenum P = Open | Closed\nactor X\naction Do\nentity R\n"
+            "forbid * Do R when S = Off\npermit X Do R when P = Open\n"
+            "forbid * Do R when S = On and P = Closed\n"
+        )
+        self.assertEqual(blocking_kinds(base), Counter({"CONTRADICTION": 1}))
+        ascii_form = base + "invariant I: S = Off => P != Open\n"
+        unicode_form = base + "invariant I: S = Off ⇒ P ≠ Open\n"
+        self.assertEqual(blocking_kinds(ascii_form), Counter())
+        self.assertEqual(blocking_kinds(unicode_form), Counter())
+
+    def test_quantifier_ranges_over_the_values_of_an_enum(self):
+        base = (
+            "module m\nenum S = On | Off\nenum P = Open | Closed\nactor X\naction Do\nentity R\n"
+            "forbid * Do R when S = Off\npermit X Do R when P = Open\n"
+            "forbid * Do R when S = On and P = Closed\n"
+        )
+        text = base + "invariant I: ∀ s ∈ S : s = Off ⇒ P ∈ {Closed}\n"
+        self.assertEqual(blocking_kinds(text), Counter())
+
+    def test_invariant_with_undefined_names_is_reported(self):
+        text = "module m\nenum S = On | Off\ninvariant I: S = Maybe\ninvariant J: Nothing = On\ninvariant K: T ∈ {On}"
+        self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 3}))
+
+    def test_invariants_that_exclude_every_combination_contradict(self):
+        text = "module m\nenum S = On | Off\ninvariant A: S = On\ninvariant B: S = Off"
+        self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
+
+    def test_invariant_is_rendered_with_symbols(self):
+        text = "module m\nenum S = On | Off\nenum P = Open | Closed\ninvariant I: ∀ s ∈ S : (s = Off ∧ P = Open) ⇒ ¬(P = Closed) why \"x\""
+        module = parse_module(text)
+        document = render(module, check(module))
+        self.assertIn("- x (`∀ s ∈ S : s = Off ∧ P = Open ⇒ ¬(P = Closed)`)", document)
+
     def test_syntax_error_reports_the_line(self):
         with self.assertRaises(PdlSyntaxError) as raised:
             parse_module("module m\nenum E A")

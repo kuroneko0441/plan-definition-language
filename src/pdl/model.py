@@ -169,6 +169,58 @@ class Law:
 
 
 @dataclass
+class Atom:
+    left: str
+    operator: str
+    right: str
+
+
+@dataclass
+class InSet:
+    left: str
+    values: list[str]
+
+
+@dataclass
+class Not:
+    operand: "Formula"
+
+
+@dataclass
+class And:
+    operands: list["Formula"]
+
+
+@dataclass
+class Or:
+    operands: list["Formula"]
+
+
+@dataclass
+class Implies:
+    premise: "Formula"
+    conclusion: "Formula"
+
+
+@dataclass
+class ForAll:
+    variable: str
+    enum: str
+    body: "Formula"
+
+
+Formula = Union[Atom, InSet, Not, And, Or, Implies, ForAll]
+
+
+@dataclass
+class Invariant:
+    line: int
+    name: str
+    formula: Formula
+    why: str = ""
+
+
+@dataclass
 class Module:
     name: str
     label: str = ""
@@ -181,6 +233,7 @@ class Module:
     declarations: list[Declaration] = field(default_factory=list)
     rules: list[Rule] = field(default_factory=list)
     exclusions: list[Exclusion] = field(default_factory=list)
+    invariants: list[Invariant] = field(default_factory=list)
     machines: list[Machine] = field(default_factory=list)
     scenarios: list[Scenario] = field(default_factory=list)
     unknowns: list[Unknown] = field(default_factory=list)

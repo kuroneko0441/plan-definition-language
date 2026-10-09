@@ -97,6 +97,9 @@ class Machine:
     events: list[str] = field(default_factory=list)
     transitions: list[Transition] = field(default_factory=list)
     handlings: list[Handling] = field(default_factory=list)
+    label: str = ""
+    state_labels: dict[str, str] = field(default_factory=dict)
+    event_labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

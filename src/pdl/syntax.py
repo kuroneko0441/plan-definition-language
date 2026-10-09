@@ -126,6 +126,16 @@ class Parser:
     def label(self) -> str:
         return self.string() if self.accept("label") else ""
 
+    def labeled_words(self) -> list[tuple[str, str]]:
+        items = []
+        while True:
+            word = self.word()
+            following = self.peek()
+            label = self.string() if following is not None and following.kind == "string" else ""
+            items.append((word, label))
+            if not self.accept(","):
+                return items
+
     def parenthesized_words(self) -> list[str]:
         self.expect("(")
         words = self.comma_words()
@@ -254,6 +264,7 @@ class Parser:
     def machine(self, module: Module) -> None:
         line = self.expect("machine").line
         machine = Machine(line, self.word())
+        machine.label = self.label()
         self.expect("{")
         while not self.accept("}"):
             token = self.peek()
@@ -261,7 +272,10 @@ class Parser:
                 raise PdlSyntaxError(line, f"machine {machine.name} is not closed")
             if token.kind == "word" and token.value == "states":
                 self.advance()
-                machine.states += self.comma_words()
+                for state, state_label in self.labeled_words():
+                    machine.states.append(state)
+                    if state_label:
+                        machine.state_labels[state] = state_label
             elif token.kind == "word" and token.value == "initial":
                 self.advance()
                 machine.initial = self.word()
@@ -270,7 +284,10 @@ class Parser:
                 machine.terminals += self.comma_words()
             elif token.kind == "word" and token.value == "event":
                 self.advance()
-                machine.events += self.comma_words()
+                for event, event_label in self.labeled_words():
+                    machine.events.append(event)
+                    if event_label:
+                        machine.event_labels[event] = event_label
             elif token.kind == "word" and token.value in ("ignore", "reject"):
                 self.advance()
                 state = self.name_or_star()

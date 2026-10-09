@@ -223,8 +223,8 @@ class RenderTest(unittest.TestCase):
 
     def test_rules_become_korean_sentences_with_the_right_particles(self):
         document = self.render_example("edi_row_rules.pdl")
-        self.assertIn("- 업로드 상태가 '열림'일 때, 딜러는 EDI 제출을 업로드할 수 있다.", document)
-        self.assertIn("- EDI팀은 EDI 제출을 대리 등록할 수 있다.", document)
+        self.assertIn("- 업로드 상태가 '열림'일 때, 딜러는 EDI를 업로드할 수 있다.", document)
+        self.assertIn("- EDI팀은 EDI를 대리 등록할 수 있다.", document)
         self.assertIn("- 행 상태가 '입력'일 때, EDI팀은 EDI 행을 수정할 수 있다.", document)
         self.assertIn(
             "- 행 상태가 '제약사 마감 완료'일 때, EDI팀은 EDI 행을 수정할 수 있다. 이때 수정 사유를 입력해야 한다.",
@@ -234,11 +234,32 @@ class RenderTest(unittest.TestCase):
 
     def test_rules_become_english_sentences(self):
         document = self.render_example("edi_row_rules.pdl", "en")
-        self.assertIn("- When UploadWindow is Open, Dealer may UploadEdi EdiSubmission.", document)
+        self.assertIn("- When UploadWindow is Open, Dealer may UploadEdi Edi.", document)
 
     def test_time_rule_is_rendered(self):
         document = self.render_example("edi_row_rules.pdl", "en")
-        self.assertIn("EdiSubmission.settlement_month = next(EdiSubmission.submission_month)", document)
+        self.assertIn("Edi.settlement_month = next(Edi.submission_month)", document)
+
+    def test_monthly_workflow_is_rendered_with_labels(self):
+        document = self.render_example("edi_row_rules.pdl")
+        self.assertIn("## 상태 머신: 월별 EDI 업무", document)
+        self.assertIn(
+            "- '업로드 시작 전' 상태에서 '매달 업로드 시작' 사건이 일어나면 '업로드와 입력 진행' 상태가 된다. (주체: 달력)",
+            document,
+        )
+        self.assertIn("  - 근거: 매달 EDI 업로드가 시작되면 EDI팀은 입력을 시작한다.", document)
+        self.assertIn('    state "업로드 마감" as Closed', document)
+
+    def test_mixed_state_and_list_content_are_rendered(self):
+        document = self.render_example("edi_row_rules.pdl")
+        self.assertIn("- 혼합 상태: EDI의 행마다 상태가 다를 수 있다.", document)
+        self.assertIn("- EDI 목록: EDI 목록은 혼합 상태를 표시하고", document)
+        self.assertIn("| EDI 목록에 보이는 상태 (ListStatus) | Input (입력), Submission (제출), Monitoring (모니터링), Settlement (정산) |", document)
+
+    def test_unverified_assumption_is_listed(self):
+        document = self.render_example("edi_row_rules.pdl")
+        self.assertIn("## 미검증 임시 결정", document)
+        self.assertIn("submission_before_close", document)
 
     def test_machine_is_rendered_as_a_diagram(self):
         module = parse_module(COVERED_MACHINE)

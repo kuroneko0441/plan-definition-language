@@ -3,7 +3,7 @@
 from itertools import product
 
 from .checks import Finding, Index, triple_outcomes
-from .model import Module, Reference, Term
+from .model import Machine, Module, Reference, Term
 from .prose import Names, sentence
 
 LABELS = {
@@ -39,6 +39,10 @@ LABELS = {
         "source": "출처",
         "provisional": "임시 값",
         "terminal": "종결 상태",
+        "initial": "시작 상태",
+        "ignore": "무시한다",
+        "reject": "거부한다",
+        "otherwise": "그 밖의 모든 상태에서 사건",
         "start": "시작",
         "events": "사건 순서",
         "expect": "기대 상태",
@@ -77,6 +81,10 @@ LABELS = {
         "source": "Source",
         "provisional": "Provisional value",
         "terminal": "Terminal states",
+        "initial": "Initial state",
+        "ignore": "ignored",
+        "reject": "rejected",
+        "otherwise": "In every other state, event",
         "start": "Start",
         "events": "Event sequence",
         "expect": "Expected state",
@@ -141,25 +149,67 @@ def render_permissions(
     return lines
 
 
-def render_machines(module: Module, labels: dict[str, str]) -> list[str]:
-    lines = []
+def render_machines(
+    module: Module, labels: dict[str, str], names: Names, language: str
+) -> list[str]:
+    lines: list[str] = []
+    machines = {machine.name: machine for machine in module.machines}
+
+    def state_text(machine: Machine, state: str) -> str:
+        return machine.state_labels.get(state) or state if language == "ko" else state
+
+    def event_text(machine: Machine, event: str) -> str:
+        return machine.event_labels.get(event) or event if language == "ko" else event
+
     for machine in module.machines:
-        lines += [f"## {labels['machines']}: {machine.name}", "", "```mermaid", "stateDiagram-v2"]
+        title = machine.label if language == "ko" and machine.label else machine.name
+        lines += [f"## {labels['machines']}: {title}", "", "```mermaid", "stateDiagram-v2"]
+        for state in machine.states:
+            if state_text(machine, state) != state:
+                lines.append(f'    state "{state_text(machine, state)}" as {state}')
         lines.append(f"    [*] --> {machine.initial}")
         for transition in machine.transitions:
-            actor = f" ({transition.actor})" if transition.actor else ""
-            lines.append(f"    {transition.source} --> {transition.target}: {transition.event}{actor}")
+            actor = f" ({names.show(transition.actor)})" if transition.actor else ""
+            event = event_text(machine, transition.event)
+            lines.append(f"    {transition.source} --> {transition.target}: {event}{actor}")
         lines += [f"    {terminal} --> [*]" for terminal in machine.terminals]
         lines += ["```", ""]
-        rows = [[t.source, t.event, t.target, t.actor, t.why] for t in machine.transitions]
-        lines += table([labels[key] for key in ("from", "event", "to", "actor", "why")], rows)
+        lines.append(f"- {labels['initial']}: {state_text(machine, machine.initial)}")
+        lines.append(
+            f"- {labels['terminal']}: {', '.join(state_text(machine, s) for s in machine.terminals)}"
+        )
+        lines.append("")
+        for transition in machine.transitions:
+            source = state_text(machine, transition.source)
+            target = state_text(machine, transition.target)
+            event = event_text(machine, transition.event)
+            actor = names.show(transition.actor) if transition.actor else "-"
+            if language == "ko":
+                lines.append(
+                    f"- '{source}' 상태에서 '{event}' 사건이 일어나면 '{target}' 상태가 된다. (주체: {actor})"
+                )
+            else:
+                lines.append(f"- In {source}, {event} moves to {target}. (actor: {actor})")
+            if transition.why:
+                lines.append(f"  - {labels['why']}: {transition.why}")
+        for handling in machine.handlings:
+            event = event_text(machine, handling.event)
+            outcome = labels[handling.kind]
+            if handling.state == "*":
+                lines.append(f"- {labels['otherwise']} '{event}': {outcome}")
+            else:
+                lines.append(f"- '{state_text(machine, handling.state)}' + '{event}': {outcome}")
+        lines.append("")
     for scenario in module.scenarios:
+        machine = machines.get(scenario.machine)
+        if machine is None:
+            continue
         lines += [
             f"### {labels['scenarios']}: {scenario.name}",
             "",
-            f"- {labels['start']}: {scenario.start}",
-            f"- {labels['events']}: {', '.join(scenario.events)}",
-            f"- {labels['expect']}: {scenario.expect}",
+            f"- {labels['start']}: {state_text(machine, scenario.start)}",
+            f"- {labels['events']}: {', '.join(event_text(machine, e) for e in scenario.events)}",
+            f"- {labels['expect']}: {state_text(machine, scenario.expect)}",
             "",
         ]
     return lines
@@ -221,7 +271,7 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
         if passive:
             lines += [f"- {labels['passive']}: {', '.join(passive)}", ""]
     lines += render_permissions(module, index, labels, names, language)
-    lines += render_machines(module, labels)
+    lines += render_machines(module, labels, names, language)
     if module.laws:
         lines += [f"## {labels['laws']}", ""]
         for law in module.laws:

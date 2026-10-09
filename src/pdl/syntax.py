@@ -214,17 +214,23 @@ class Parser:
         passive = self.accept("passive")
         fields: list[tuple[str, str]] = []
         field_notes: dict[str, str] = {}
+        field_labels: dict[str, str] = {}
         if self.accept("{"):
             while not self.accept("}"):
                 field_name = self.word()
                 self.expect(":")
                 fields.append((field_name, self.word()))
+                field_label = self.label()
+                if field_label:
+                    field_labels[field_name] = field_label
                 note = self.why()
                 if note:
                     field_notes[field_name] = note
                 self.accept(",")
         module.entities.append(
-            EntityDefinition(line, name, key, passive, fields, self.why(), label, field_notes)
+            EntityDefinition(
+                line, name, key, passive, fields, self.why(), label, field_notes, field_labels
+            )
         )
         module.definitions.append(("entity", name, line))
 

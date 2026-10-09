@@ -478,12 +478,11 @@ def check_unknowns(module: Module, index: Index) -> list[Finding]:
     findings = []
     for unknown in module.unknowns:
         attributes = unknown.attributes
+        title = unknown.identifier + (f" ({attributes['label']})" if "label" in attributes else "")
         if "source" not in attributes:
             findings.append(Finding("MISSING_SOURCE", f"unknown {unknown.identifier} has no source", unknown.line))
         if unknown.policy == "structure":
-            findings.append(
-                Finding("UNKNOWN_STRUCTURE", f"the structure {unknown.identifier} is undecided", unknown.line)
-            )
+            findings.append(Finding("UNKNOWN_STRUCTURE", f"the structure {title} is undecided", unknown.line))
         elif unknown.policy == "value":
             if "provisional" not in attributes:
                 findings.append(

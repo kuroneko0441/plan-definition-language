@@ -30,6 +30,7 @@ class EntityDefinition:
     why: str = ""
     label: str = ""
     field_notes: dict[str, str] = field(default_factory=dict)
+    field_labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

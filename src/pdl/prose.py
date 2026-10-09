@@ -10,9 +10,14 @@ FINAL_CONSONANT_SLOTS = 28
 class Names:
     def __init__(self, module: Module, language: str):
         self.labels: dict[str, str] = {}
+        self.field_types = {(e.name, n): t for e in module.entities for n, t in e.fields}
+        self.field_labels: dict[tuple[str, str], str] = {}
         if language != "ko":
             self.value_labels: dict[tuple[str, str], str] = {}
             return
+        for entity in module.entities:
+            for field_name, field_label in entity.field_labels.items():
+                self.field_labels[(entity.name, field_name)] = field_label
         for entity in reversed(module.entities):
             if entity.label:
                 self.labels[entity.name] = entity.label
@@ -39,6 +44,10 @@ class Names:
 
     def show(self, name: str) -> str:
         return self.labels.get(name) or name
+
+    def field(self, entity: str, attribute: str) -> str:
+        label = self.field_labels.get((entity, attribute))
+        return label or self.show(self.field_types.get((entity, attribute), attribute))
 
     def value(self, variable: str, value: str) -> str:
         return self.value_labels.get((variable, value)) or value

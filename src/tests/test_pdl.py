@@ -213,6 +213,18 @@ class ExampleTest(unittest.TestCase):
             Counter({"UNHANDLED": 1, "UNKNOWN_STRUCTURE": 1}),
         )
 
+    def test_carry_over_waits_for_two_undecided_structures(self):
+        self.assertEqual(example_kinds("carry_over.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
+
+    def test_channels_wait_for_two_undecided_structures(self):
+        self.assertEqual(example_kinds("channels.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
+
+    def test_team_permissions_leave_one_combination_and_one_structure_open(self):
+        self.assertEqual(
+            example_kinds("org_roles.pdl"),
+            Counter({"UNCOVERED": 1, "UNKNOWN_STRUCTURE": 1}),
+        )
+
     def test_documented_issue_transitions_leave_user_set_states_open(self):
         kinds = example_kinds("issue_tracker.pdl")
         self.assertEqual(kinds["UNREACHABLE"], 2)
@@ -300,6 +312,22 @@ class RenderTest(unittest.TestCase):
         self.assertIn("타이레놀 5개와 우루사 3개", document)
         self.assertIn("변경 전후 값, 수정 사유, 수정자와 시각을 이력으로 기록한다", document)
         self.assertIn("edited_at: Timestamp - 수정 시각이다.", document)
+
+    def test_screen_items_use_field_labels(self):
+        text = (EXAMPLES / "carry_over.pdl").read_text(encoding="utf-8")
+        module = parse_module(text[: text.index("unknown structure")])
+        self.assertEqual([f for f in check(module) if f.blocking], [])
+        document = render(module, check(module))
+        self.assertIn(
+            "- 이월 현황은 원장 행의 분할 전 행, 원장 행의 제출월, 원장 행의 정산월을 보여 준다.",
+            document,
+        )
+        self.assertIn("- EDI팀은 제출채널을 관리할 수 있다.", self.render_without_unknowns("channels.pdl"))
+
+    def render_without_unknowns(self, name: str) -> str:
+        text = (EXAMPLES / name).read_text(encoding="utf-8")
+        module = parse_module(text[: text.index("unknown structure")])
+        return render(module, check(module))
 
     def test_machine_is_rendered_as_a_diagram(self):
         module = parse_module(COVERED_MACHINE)

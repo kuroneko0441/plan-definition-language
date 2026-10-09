@@ -137,13 +137,12 @@ def render_views(module: Module, labels: dict[str, str], names: Names, language:
         lines.append("")
     if module.screens:
         lines += [f"## {labels['screens']}", ""]
-        types = {(e.name, field_name): type_name for e in module.entities for field_name, type_name in e.fields}
         for screen in module.screens:
             items = []
             for item in screen.shows:
                 if "." in item:
                     entity_name, attribute = item.split(".", 1)
-                    shown = f"{names.show(entity_name)}의 {names.show(types[(entity_name, attribute)])}"
+                    shown = f"{names.show(entity_name)}의 {names.field(entity_name, attribute)}"
                     items.append(shown if language == "ko" else item)
                 else:
                     items.append(names.show(item))
@@ -315,7 +314,9 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
                     titled(e.name),
                     ", ".join(e.key),
                     "<br>".join(
-                        f"{n}: {t}" + (f" - {e.field_notes[n]}" if n in e.field_notes else "")
+                        (f"{n} ({e.field_labels[n]})" if n in e.field_labels else n)
+                        + f": {t}"
+                        + (f" - {e.field_notes[n]}" if n in e.field_notes else "")
                         for n, t in e.fields
                     ),
                     e.why,

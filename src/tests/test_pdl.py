@@ -423,6 +423,18 @@ class ExampleTest(unittest.TestCase):
     def test_menus_wait_for_two_undecided_structures(self):
         self.assertEqual(example_kinds("menus.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
 
+    def test_basic_flow_waits_for_two_undecided_structures(self):
+        self.assertEqual(example_kinds("basic_flow.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
+
+    def test_settlement_cases_leave_seven_reasons_without_a_treatment(self):
+        self.assertEqual(
+            example_kinds("settlement_adjustments.pdl"),
+            Counter({"UNCOVERED": 1, "UNKNOWN_STRUCTURE": 3}),
+        )
+        module = parse_module((EXAMPLES / "settlement_adjustments.pdl").read_text(encoding="utf-8"))
+        message = next(f.message for f in check(module) if f.kind == "UNCOVERED")
+        self.assertIn("(7 combinations)", message)
+
     def test_every_open_question_of_the_source_is_listed(self):
         self.assertEqual(example_kinds("open_questions.pdl"), Counter({"UNKNOWN_STRUCTURE": 28}))
 

@@ -225,6 +225,16 @@ class ExampleTest(unittest.TestCase):
             Counter({"UNCOVERED": 1, "UNKNOWN_STRUCTURE": 1}),
         )
 
+    def test_auto_answer_rules_leave_five_combinations_unanswered_per_action(self):
+        self.assertEqual(
+            example_kinds("filtering_auto_answer.pdl"), Counter({"UNCOVERED": 2})
+        )
+        module = parse_module((EXAMPLES / "filtering_auto_answer.pdl").read_text(encoding="utf-8"))
+        message = next(f.message for f in check(module) if "AnswerAvailable" in f.message)
+        self.assertIn("(5 combinations)", message)
+        self.assertIn("DealerHolds=Yes, Received=Provisional, UpstreamReply=NotAsked", message)
+        self.assertIn("DealerHolds=No, Received=Nothing, UpstreamReply=Otherwise", message)
+
     def test_documented_issue_transitions_leave_user_set_states_open(self):
         kinds = example_kinds("issue_tracker.pdl")
         self.assertEqual(kinds["UNREACHABLE"], 2)

@@ -9,6 +9,7 @@ from .model import Call, Condition, Exclusion, Machine, Module, Reference, Rule,
 TIME_TYPES = ("Day", "Week", "Month")
 BUILTIN_TYPES = ("Text", "Int", "Bool", "Timestamp") + TIME_TYPES
 ENUMERATION_LIMIT = 20000
+SAMPLE_LIMIT = 6
 
 
 @dataclass
@@ -298,12 +299,12 @@ def check_permissions(module: Module, index: Index) -> list[Finding]:
                 )
             )
         if uncovered:
-            sample = uncovered[0]
+            listed = "; ".join(describe(outcome.assignment) for outcome in uncovered[:SAMPLE_LIMIT])
+            more = f"; and {len(uncovered) - SAMPLE_LIMIT} more" if len(uncovered) > SAMPLE_LIMIT else ""
             findings.append(
                 Finding(
                     "UNCOVERED",
-                    f"{label} has no rule when {describe(sample.assignment)}"
-                    f" ({len(uncovered)} combinations)",
+                    f"{label} has no rule when {listed}{more} ({len(uncovered)} combinations)",
                     0,
                 )
             )

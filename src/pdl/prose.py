@@ -41,6 +41,13 @@ class Names:
             for enum in module.enums
             for value, label in enum.value_labels.items()
         }
+        for machine in module.machines:
+            if machine.label:
+                self.labels[machine.name] = machine.label
+            for counter, counter_label in machine.counter_labels.items():
+                self.labels[counter] = counter_label
+            for state, state_label in machine.state_labels.items():
+                self.value_labels[(machine.name, state)] = state_label
 
     def show(self, name: str) -> str:
         return self.labels.get(name) or name

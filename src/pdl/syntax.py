@@ -1,6 +1,7 @@
 """Tokenizer and parser for plan definition language source text."""
 
 import re
+from pathlib import Path
 from typing import NamedTuple
 
 from .model import (
@@ -38,7 +39,7 @@ TOKEN_PATTERN = re.compile(
     r"(?P<space>\s+)"
     r"|(?P<comment>#[^\n]*)"
     r"|(?P<string>\"(?:[^\"\\]|\\.)*\")"
-    r"|(?P<symbol>->|→|<=|>=|≤|≥|=>|⇒|!=|≠|∧|∨|¬|∀|∈|[{}(),:=|*<>.;?])"
+    r"|(?P<symbol>->|→|<=|>=|≤|≥|=>|⇒|!=|≠|∧|∨|¬|∀|∈|[{}(),:=|*<>.;?+])"
     r"|(?P<word>\w+)"
 )
 SYMBOL_ALIASES = {"→": "->", "≤": "<=", "≥": ">=", "⇒": "=>", "≠": "!="}
@@ -179,6 +180,19 @@ class Parser:
                 conditions.append(self.condition())
         return conditions
 
+    def effects(self) -> list[tuple[str, str, int]]:
+        effects: list[tuple[str, str, int]] = []
+        if self.accept("then"):
+            while True:
+                counter = self.word()
+                token = self.advance()
+                if token.kind == "string" or token.value not in ("+", "="):
+                    raise PdlSyntaxError(token.line, f"expected + or = but found {token.value!r}")
+                effects.append((counter, token.value, int(self.word())))
+                if not self.accept(","):
+                    break
+        return effects
+
     def assumptions(self) -> list[str]:
         return self.comma_words() if self.accept("assuming") else []
 
@@ -187,6 +201,7 @@ class Parser:
         module = Module(name=self.word())
         module.label = self.label()
         statements = {
+            "import": self.import_statement,
             "term": self.glossary,
             "enum": self.enum,
             "entity": self.entity,
@@ -225,16 +240,25 @@ class Parser:
         self.expect("=")
         values: list[str] = []
         value_labels: dict[str, str] = {}
+        stored: dict[str, str] = {}
         while True:
             value = self.word()
             values.append(value)
             following = self.peek()
             if following is not None and following.kind == "string":
                 value_labels[value] = self.string()
+            if self.accept("stored"):
+                stored[value] = self.string()
             if not self.accept("|"):
                 break
-        module.enums.append(EnumDefinition(line, name, values, self.why(), label, value_labels))
+        module.enums.append(
+            EnumDefinition(line, name, values, self.why(), label, value_labels, stored)
+        )
         module.definitions.append(("enum", name, line))
+
+    def import_statement(self, module: Module) -> None:
+        line = self.expect("import").line
+        module.imports.append((line, self.string()))
 
     def entity(self, module: Module) -> None:
         line = self.expect("entity").line
@@ -420,6 +444,15 @@ class Parser:
             elif token.kind == "word" and token.value == "cyclic":
                 self.advance()
                 machine.cyclic = True
+            elif token.kind == "word" and token.value == "counter":
+                self.advance()
+                counter = self.word()
+                counter_label = self.string() if self.peek() is not None and self.peek().kind == "string" else ""
+                self.expect("max")
+                machine.counters[counter] = int(self.word())
+                if counter_label:
+                    machine.counter_labels[counter] = counter_label
+                module.definitions.append(("counter", counter, token.line))
             elif token.kind == "word" and token.value in ("ignore", "reject"):
                 self.advance()
                 state = self.name_or_star()
@@ -436,11 +469,13 @@ class Parser:
                 self.expect("on")
                 event = self.word()
                 conditions = self.conditions_after("when")
+                effects = self.effects()
                 actors = self.comma_words() if self.accept("by") else []
+                after = self.string() if self.accept("after") else ""
                 assumes = self.assumptions()
                 machine.transitions.append(
                     Transition(
-                        token.line, source, target, event, actors, self.why(), assumes, conditions
+                        token.line, source, target, event, actors, self.why(), assumes, conditions, effects, after
                     )
                 )
         module.machines.append(machine)
@@ -495,5 +530,33 @@ class Parser:
         module.laws.append(Law(line, identifier, left, token.value, right, self.why(), assumes))
 
 
-def parse_module(text: str) -> Module:
-    return Parser(tokenize(text)).module()
+IMPORTED_KINDS = ("enum", "entity", "term", "actor", "action", "external")
+
+
+def merge_imports(module: Module, source: Path | None, merged: set[Path], stack: list[Path]) -> None:
+    for line, relative in module.imports:
+        if source is None:
+            raise PdlSyntaxError(line, "an import needs the path of the importing file")
+        target = (source.parent / relative).resolve()
+        if target in stack:
+            raise PdlSyntaxError(line, f"import cycle through {relative}")
+        if target in merged:
+            continue
+        if not target.is_file():
+            raise PdlSyntaxError(line, f"imported file {relative} does not exist")
+        imported = Parser(tokenize(target.read_text(encoding="utf-8"))).module()
+        merged.add(target)
+        merge_imports(imported, target, merged, [*stack, target])
+        module.enums += imported.enums
+        module.entities += imported.entities
+        module.terms += imported.terms
+        module.declarations += imported.declarations
+        module.definitions += [item for item in imported.definitions if item[0] in IMPORTED_KINDS]
+
+
+def parse_module(text: str, source: Path | None = None) -> Module:
+    module = Parser(tokenize(text)).module()
+    if module.imports:
+        resolved = source.resolve() if source is not None else None
+        merge_imports(module, source, {resolved} if resolved else set(), [resolved] if resolved else [])
+    return module

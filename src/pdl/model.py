@@ -20,6 +20,7 @@ class EnumDefinition:
     why: str = ""
     label: str = ""
     value_labels: dict[str, str] = field(default_factory=dict)
+    stored: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -107,6 +108,8 @@ class Transition:
     why: str = ""
     assumes: list[str] = field(default_factory=list)
     conditions: list[Condition] = field(default_factory=list)
+    effects: list[tuple[str, str, int]] = field(default_factory=list)
+    after: str = ""
 
     @property
     def actor(self) -> str:
@@ -138,6 +141,8 @@ class Machine:
     event_labels: dict[str, str] = field(default_factory=dict)
     cyclic: bool = False
     why: str = ""
+    counters: dict[str, int] = field(default_factory=dict)
+    counter_labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -241,6 +246,7 @@ class Invariant:
 class Module:
     name: str
     label: str = ""
+    imports: list[tuple[int, str]] = field(default_factory=list)
     definitions: list[tuple[str, str, int]] = field(default_factory=list)
     terms: list[TermDefinition] = field(default_factory=list)
     enums: list[EnumDefinition] = field(default_factory=list)

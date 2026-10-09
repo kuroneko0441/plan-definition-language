@@ -37,6 +37,9 @@ LABELS = {
         "matrix_note": "조건부는 행 상태나 업로드 상태 같은 조건에 따라 허용 여부가 달라진다는 뜻이며, 조건은 위의 규칙 문장을 따른다.",
         "terms": "용어",
         "cyclic": "끝나지 않고 처음 상태로 돌아가며 반복되는 흐름",
+        "counter": "카운터",
+        "after": "제한 시간",
+        "stored": "저장값",
         "basic_types": "기본 자료형은 Text(글자), Int(정수), Decimal(소수), Money(금액), Bool(참 또는 거짓), Timestamp(시각), Duration(기간), Day(일), Week(주), Month(월)이다. 시간 값은 next(다음), before(이전), month_of(일이 속한 월)로 계산하고, 자료형 뒤의 물음표는 비어 있을 수 있음을, list는 여러 개를 뜻한다.",
         "formulas": "식",
         "draft": "초안",
@@ -93,6 +96,9 @@ LABELS = {
         "matrix_note": "Conditional means the result depends on a condition stated in the rules above.",
         "terms": "Terms",
         "cyclic": "A flow that never ends and returns to the initial state",
+        "counter": "Counter",
+        "after": "time limit",
+        "stored": "Stored text",
         "basic_types": "Basic types are Text, Int, Decimal, Money, Bool, Timestamp, Duration, Day, Week, and Month.",
         "formulas": "Formulas",
         "draft": "Draft",
@@ -345,6 +351,9 @@ def render_machines(
             )
         if machine.cyclic:
             lines.append(f"- {labels['cyclic']}")
+        for counter, maximum in machine.counters.items():
+            shown = machine.counter_labels.get(counter) if language == "ko" else None
+            lines.append(f"- {labels['counter']}: {shown or counter} (0 ~ {maximum})")
         lines.append("")
         for transition in machine.transitions:
             source = state_text(machine, transition.source)
@@ -352,15 +361,29 @@ def render_machines(
             event = event_text(machine, transition.event)
             actor = ", ".join(names.show(a) for a in transition.actors) or "-"
             note = assumption_text(transition.assumes, module, labels)
+            effects = ", ".join(
+                (
+                    f"{(machine.counter_labels.get(counter) if language == 'ko' else None) or counter} "
+                    + (f"{amount}(으)로 되돌림" if operator == "=" and language == "ko" else
+                       f"reset to {amount}" if operator == "=" else
+                       f"+{amount}")
+                )
+                for counter, operator, amount in transition.effects
+            )
+            effects_note = f" ({labels['counter']}: {effects})" if effects else ""
+            after_note = f" ({labels['after']}: {transition.after})" if transition.after else ""
             if language == "ko":
                 subject = f"'{event}'" + ("이" if has_final_consonant(event) else "가")
                 guard = korean_condition(transition.conditions, names) + " " if transition.conditions else ""
                 lines.append(
-                    f"- '{source}' 상태에서 {guard}{subject} 일어나면 '{target}' 상태가 된다. (주체: {actor}){note}"
+                    f"- '{source}' 상태에서 {guard}{subject} 일어나면 '{target}' 상태가 된다. "
+                    f"(주체: {actor}){after_note}{effects_note}{note}"
                 )
             else:
                 guard = f" when {english_condition(transition.conditions, names)}" if transition.conditions else ""
-                lines.append(f"- In {source}{guard}, {event} moves to {target}. (actor: {actor}){note}")
+                lines.append(
+                    f"- In {source}{guard}, {event} moves to {target}. (actor: {actor}){after_note}{effects_note}{note}"
+                )
             if transition.why:
                 lines.append(f"  - {labels['why']}: {transition.why}")
         otherwise: dict[str, list[str]] = {}
@@ -454,7 +477,11 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
             [
                 [
                     titled(e.name),
-                    ", ".join(f"{v} ({e.value_labels[v]})" if v in e.value_labels else v for v in e.values),
+                    ", ".join(
+                        (f"{v} ({e.value_labels[v]})" if v in e.value_labels else v)
+                        + (f" [{labels['stored']}: {e.stored[v]}]" if v in e.stored else "")
+                        for v in e.values
+                    ),
                     e.why,
                 ]
                 for e in module.enums

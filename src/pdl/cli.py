@@ -10,7 +10,7 @@ from .syntax import PdlSyntaxError, parse_module
 
 def build_file(path: Path, output_directory: Path, language: str, draft: bool = False) -> bool:
     try:
-        module = parse_module(path.read_text(encoding="utf-8"))
+        module = parse_module(path.read_text(encoding="utf-8"), path)
     except PdlSyntaxError as error:
         print(f"{path}: SYNTAX {error}")
         return False

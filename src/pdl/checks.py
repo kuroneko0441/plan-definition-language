@@ -9,6 +9,7 @@ from .model import (
     Atom,
     Call,
     Condition,
+    EnumDefinition,
     ForAll,
     Formula,
     Implies,
@@ -27,6 +28,7 @@ TIME_TYPES = ("Day", "Week", "Month")
 BUILTIN_TYPES = ("Text", "Int", "Bool", "Timestamp", "Decimal", "Money", "Duration") + TIME_TYPES
 ENUMERATION_LIMIT = 20000
 SAMPLE_LIMIT = 6
+SYSTEM_LIMIT = 100000
 
 
 def base_type(type_name: str) -> str:
@@ -58,6 +60,10 @@ class Index:
         self.machines = {}
         for machine in module.machines:
             self.machines.setdefault(machine.name, machine)
+            self.enums.setdefault(machine.name, EnumDefinition(machine.line, machine.name, list(machine.states)))
+            for counter, maximum in machine.counters.items():
+                values = [str(number) for number in range(maximum + 1)]
+                self.enums.setdefault(counter, EnumDefinition(machine.line, counter, values))
         kinds = {"actor": set(), "external": set(), "action": set()}
         for declaration in module.declarations:
             kinds[declaration.kind].add(declaration.name)
@@ -214,6 +220,8 @@ def check(module: Module) -> list[Finding]:
         check_rules,
         check_permissions,
         check_machines,
+        check_system,
+        check_enums,
         check_scenarios,
         check_laws,
         check_unknowns,
@@ -582,6 +590,14 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
                 findings.append(Finding("UNDEFINED", f"actor {actor} in {label} is not defined", transition.line))
         for condition in transition.conditions:
             findings.extend(check_condition(condition, index, transition.line))
+        for counter, operator, amount in transition.effects:
+            maximum = machine.counters.get(counter)
+            if maximum is None:
+                findings.append(Finding("UNDEFINED", f"counter {counter} in {label} is not a counter of {name}", transition.line))
+            elif operator == "=" and not 0 <= amount <= maximum:
+                findings.append(Finding("UNDEFINED", f"{counter} = {amount} in {label} is outside 0..{maximum}", transition.line))
+            elif operator == "+" and amount <= 0:
+                findings.append(Finding("UNDEFINED", f"{counter} + {amount} in {label} does not increase the counter", transition.line))
         if valid:
             forward.setdefault(transition.source, set()).add(transition.target)
             backward.setdefault(transition.target, set()).add(transition.source)
@@ -637,6 +653,132 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
     return findings
 
 
+def check_enums(module: Module, index: Index) -> list[Finding]:
+    findings = []
+    for enum in module.enums:
+        counts: dict[str, int] = {}
+        for value in enum.values:
+            counts[value] = counts.get(value, 0) + 1
+        for value, count in counts.items():
+            if count > 1:
+                findings.append(Finding("DUPLICATE", f"value {value} of {enum.name} is listed {count} times", enum.line))
+        stored_counts: dict[str, list[str]] = {}
+        for value, text in enum.stored.items():
+            stored_counts.setdefault(text, []).append(value)
+            if value not in enum.values:
+                findings.append(Finding("UNDEFINED", f"stored text for {value}, which is not a value of {enum.name}", enum.line))
+        for text, values in stored_counts.items():
+            if len(values) > 1:
+                findings.append(
+                    Finding("DUPLICATE", f"values {', '.join(values)} of {enum.name} share the stored text {text!r}", enum.line)
+                )
+    return findings
+
+
+def check_system(module: Module, index: Index) -> list[Finding]:
+    machines = [machine for machine in module.machines if machine.initial in machine.states]
+    counters = [(machine.name, counter) for machine in machines for counter in machine.counters]
+    interesting = {machine.name for machine in machines} | {counter for _, counter in counters}
+    guarded = any(
+        condition.variable in interesting
+        for machine in machines
+        for transition in machine.transitions
+        for condition in transition.conditions
+    )
+    watched = [formula for formula, enums in index.invariant_terms if enums and enums <= interesting]
+    if not machines or not (counters or guarded or watched):
+        return []
+    counter_order = [counter for _, counter in counters]
+    limits = {counter: machine.counters[counter] for machine in machines for counter in machine.counters}
+    initial = (tuple(machine.initial for machine in machines), tuple(0 for _ in counter_order))
+    seen: dict[tuple, tuple | None] = {initial: None}
+    steps: dict[tuple, str] = {}
+    queue = deque([initial])
+    findings: list[Finding] = []
+    reported_overflow: set[tuple[str, int]] = set()
+    violated: set[int] = set()
+
+    def describe_path(config: tuple) -> str:
+        path = []
+        while seen[config] is not None:
+            path.append(steps[config])
+            config = seen[config]
+        return " -> ".join(reversed(path)) or "the start"
+
+    while queue:
+        config = queue.popleft()
+        states, values = config
+        assignment = {machine.name: state for machine, state in zip(machines, states)}
+        assignment.update({counter: str(value) for counter, value in zip(counter_order, values)})
+        for position, formula in enumerate(watched):
+            if position not in violated and not evaluate(formula, assignment, {}, index):
+                violated.add(position)
+                findings.append(
+                    Finding(
+                        "INVARIANT_VIOLATED",
+                        f"an invariant over machine states fails after: {describe_path(config)}"
+                        f" ({describe(assignment)})",
+                        module.invariants[0].line if module.invariants else 0,
+                    )
+                )
+        for number, machine in enumerate(machines):
+            for transition in machine.transitions:
+                if transition.source != states[number]:
+                    continue
+                if not all(
+                    condition_holds(condition, assignment)
+                    for condition in transition.conditions
+                    if condition.variable in interesting
+                ):
+                    continue
+                new_values = list(values)
+                overflow = False
+                for counter, operator, amount in transition.effects:
+                    if counter not in limits:
+                        continue
+                    position = counter_order.index(counter)
+                    if operator == "=":
+                        new_values[position] = amount
+                    elif new_values[position] + amount > limits[counter]:
+                        overflow = True
+                        key = (counter, transition.line)
+                        if key not in reported_overflow:
+                            reported_overflow.add(key)
+                            findings.append(
+                                Finding(
+                                    "OVERFLOW",
+                                    f"{counter} can exceed {limits[counter]} on {transition.source} -> {transition.target}"
+                                    f" on {transition.event} after: {describe_path(config)}",
+                                    transition.line,
+                                )
+                            )
+                    else:
+                        new_values[position] += amount
+                if overflow:
+                    continue
+                new_states = list(states)
+                new_states[number] = transition.target
+                successor = (tuple(new_states), tuple(new_values))
+                if successor not in seen:
+                    seen[successor] = config
+                    steps[successor] = f"{machine.name}: {transition.event}"
+                    queue.append(successor)
+                    if len(seen) > SYSTEM_LIMIT:
+                        return findings + [Finding("TOO_LARGE", "the combined state space is too large to explore", 0)]
+    for number, machine in enumerate(machines):
+        forward: dict[str, set[str]] = {}
+        for transition in machine.transitions:
+            forward.setdefault(transition.source, set()).add(transition.target)
+        statically = reachable_from(machine.initial, forward)
+        reached = {config[0][number] for config in seen}
+        for state in machine.states:
+            if state in statically and state not in reached:
+                findings.append(
+                    Finding("UNREACHABLE", f"state {state} of {machine.name} is never reached once guards and counters are applied", machine.line)
+                )
+    return findings
+
+
 def check_machines(module: Module, index: Index) -> list[Finding]:
     findings = []
     for machine in module.machines:
@@ -652,18 +794,23 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
             findings.append(Finding("UNDEFINED", f"machine {scenario.machine} is not defined", scenario.line))
             continue
         given = {c.variable: c.value for c in scenario.given if c.operator == "="}
+        counters = {counter: 0 for counter in machine.counters}
         ignored = {(h.state, h.event) for h in machine.handlings if h.kind == "ignore" and h.state != "*"}
         ignored_events = {h.event for h in machine.handlings if h.kind == "ignore" and h.state == "*"}
         state = scenario.start
         failed = False
         for event in scenario.events:
+            world = {**given, **{counter: str(value) for counter, value in counters.items()}}
             applicable = [
                 t
                 for t in machine.transitions
-                if t.source == state and t.event == event and all(condition_holds(c, given) for c in t.conditions)
+                if t.source == state and t.event == event and all(condition_holds(c, world) for c in t.conditions)
             ]
             if applicable:
                 state = applicable[0].target
+                for counter, operator, amount in applicable[0].effects:
+                    if counter in counters:
+                        counters[counter] = amount if operator == "=" else counters[counter] + amount
             elif (state, event) in ignored or event in ignored_events:
                 continue
             else:

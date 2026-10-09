@@ -352,6 +352,141 @@ class ExtensionTest(unittest.TestCase):
                 build_file(path, TempPath(directory), "ko", draft=True)
 
 
+COUNTER_MACHINE = (
+    "module m\nexternal Ext\n"
+    "machine M { counter Streak max 2\nstates A, B\ninitial A\nterminal B\nevent Loss, Win\n"
+    "A -> A on Loss when Streak in {0, 1} then Streak + 1 by Ext\n"
+    "A -> B on Loss when Streak = 2 by Ext\n"
+    "A -> A on Win then Streak = 0 by Ext\n"
+    "ignore B on Loss\nignore B on Win }\n"
+    "scenario three_losses on M { start A events Loss, Loss, Loss expect B }\n"
+)
+
+CROSS_MACHINES = (
+    "module m\nexternal Ext\n"
+    "machine P { states Ok, Bad\ninitial Ok\nterminal Bad\nevent Fail\nOk -> Bad on Fail by Ext\nignore Bad on Fail }\n"
+    "machine T { states Open, Done\ninitial Open\nterminal Done\nevent Finish\n"
+    "Open -> Done on Finish by Ext\nignore Done on Finish }\n"
+    "invariant done_needs_ok: T = Done => P = Ok\n"
+)
+
+
+class CapabilityTest(unittest.TestCase):
+    def test_stored_texts_must_be_unique_within_an_enum(self):
+        ok = 'module m\nenum A = X "엑스" stored "엑스값" | Y stored "와이값"'
+        self.assertEqual(blocking_kinds(ok), Counter())
+        clash = 'module m\nenum A = X stored "같은값" | Y stored "같은값"'
+        self.assertEqual(blocking_kinds(clash), Counter({"DUPLICATE": 1}))
+
+    def test_stored_text_is_shown_next_to_the_value(self):
+        module = parse_module('module m\nenum A = X "엑스" stored "엑스값" | Y')
+        document = render(module, check(module))
+        self.assertIn("X (엑스) [저장값: 엑스값], Y", document)
+
+    def test_a_repeated_enum_value_is_reported(self):
+        self.assertEqual(blocking_kinds("module m\nenum A = X | X"), Counter({"DUPLICATE": 1}))
+
+    def test_import_brings_in_shared_definitions(self):
+        import tempfile
+        from pathlib import Path as TempPath
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = TempPath(directory)
+            (root / "common.pdl").write_text("module common\nenum S = On | Off\nactor X\n", encoding="utf-8")
+            text = 'module m\nimport "common.pdl"\naction Do\nentity R\nforbid X Do R when S = Off\npermit X Do R when S = On\n'
+            module = parse_module(text, root / "main.pdl")
+            self.assertEqual([f for f in check(module) if f.blocking], [])
+
+    def test_a_file_imported_twice_is_merged_once(self):
+        import tempfile
+        from pathlib import Path as TempPath
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = TempPath(directory)
+            (root / "d.pdl").write_text("module d\nenum S = On | Off\n", encoding="utf-8")
+            (root / "b.pdl").write_text('module b\nimport "d.pdl"\n', encoding="utf-8")
+            (root / "c.pdl").write_text('module c\nimport "d.pdl"\n', encoding="utf-8")
+            module = parse_module('module a\nimport "b.pdl"\nimport "c.pdl"\n', root / "a.pdl")
+            self.assertEqual([f for f in check(module) if f.blocking], [])
+            self.assertEqual(len(module.enums), 1)
+
+    def test_import_problems_are_syntax_errors(self):
+        import tempfile
+        from pathlib import Path as TempPath
+
+        with self.assertRaises(PdlSyntaxError):
+            parse_module('module m\nimport "x.pdl"')
+        with tempfile.TemporaryDirectory() as directory:
+            root = TempPath(directory)
+            with self.assertRaises(PdlSyntaxError):
+                parse_module('module m\nimport "missing.pdl"', root / "m.pdl")
+            (root / "a.pdl").write_text('module a\nimport "b.pdl"\n', encoding="utf-8")
+            (root / "b.pdl").write_text('module b\nimport "a.pdl"\n', encoding="utf-8")
+            with self.assertRaises(PdlSyntaxError):
+                parse_module((root / "a.pdl").read_text(encoding="utf-8"), root / "a.pdl")
+
+    def test_imported_definition_that_clashes_is_a_duplicate(self):
+        import tempfile
+        from pathlib import Path as TempPath
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = TempPath(directory)
+            (root / "common.pdl").write_text("module common\nenum S = On | Off\n", encoding="utf-8")
+            module = parse_module('module m\nimport "common.pdl"\nenum S = A | B\n', root / "m.pdl")
+            self.assertEqual(Counter(f.kind for f in check(module) if f.blocking), Counter({"DUPLICATE": 1}))
+
+    def test_a_counter_with_matching_guards_passes_and_the_scenario_counts(self):
+        self.assertEqual(blocking_kinds(COUNTER_MACHINE), Counter())
+
+    def test_a_counter_guard_gap_is_reported(self):
+        text = COUNTER_MACHINE.replace("A -> B on Loss when Streak = 2 by Ext\n", "A -> B on Loss when Streak = 1 by Ext\n")
+        counts = blocking_kinds(text)
+        self.assertEqual(counts["UNCOVERED"], 1)
+        self.assertEqual(counts["CONTRADICTION"], 1)
+
+    def test_a_counter_that_can_exceed_its_maximum_is_reported(self):
+        text = (
+            "module m\nexternal Ext\nmachine M { counter C max 1\nstates A\ninitial A\nterminal A\nevent Go\n"
+            "A -> A on Go then C + 1 by Ext }"
+        )
+        self.assertEqual(blocking_kinds(text), Counter({"OVERFLOW": 1}))
+
+    def test_effects_must_name_a_counter_and_stay_in_range(self):
+        text = COUNTER_MACHINE.replace("then Streak = 0", "then Missing = 0").replace("Streak + 1", "Streak = 9")
+        self.assertEqual(blocking_kinds(text)["UNDEFINED"], 2)
+
+    def test_counter_and_time_limit_are_rendered(self):
+        text = COUNTER_MACHINE.replace("A -> A on Win then Streak = 0 by Ext", 'A -> A on Win then Streak = 0 by Ext after "60초"')
+        module = parse_module(text)
+        document = render(module, check(module))
+        self.assertIn("- 카운터: Streak (0 ~ 2)", document)
+        self.assertIn("(제한 시간: 60초)", document)
+        self.assertIn("(카운터: Streak 0(으)로 되돌림)", document)
+        self.assertIn("(카운터: Streak +1)", document)
+
+    def test_a_task_cannot_finish_while_a_photo_has_failed(self):
+        findings = [f for f in check(parse_module(CROSS_MACHINES)) if f.blocking]
+        self.assertEqual([f.kind for f in findings], ["INVARIANT_VIOLATED"])
+        self.assertIn("P: Fail -> T: Finish", findings[0].message)
+
+    def test_a_guard_on_another_machine_keeps_the_invariant(self):
+        text = CROSS_MACHINES.replace(
+            "Open -> Done on Finish by Ext", "Open -> Done on Finish when P = Ok by Ext\nignore Open on Finish"
+        ).replace("Ok -> Bad on Fail by Ext\nignore Bad", "Ok -> Bad on Fail when T = Open by Ext\nignore Ok on Fail\nignore Bad")
+        self.assertEqual(blocking_kinds(text), Counter())
+
+    def test_a_state_that_a_guard_makes_unreachable_is_reported(self):
+        text = (
+            "module m\nexternal Ext\n"
+            "machine P { states Ok, Bad\ninitial Ok\nterminal Bad\nevent Fail\nOk -> Ok on Fail by Ext\nignore Bad on Fail }\n"
+            "machine T { states Open, Done\ninitial Open\nterminal Done\nevent Finish\n"
+            "Open -> Done on Finish when P = Bad by Ext\nignore Open on Finish\nignore Done on Finish }\n"
+        )
+        counts = blocking_kinds(text)
+        self.assertEqual(counts["UNREACHABLE"], 2)
+        self.assertEqual(counts["TRAP"], 1)
+
+
 class ExampleTest(unittest.TestCase):
     def test_negative_control_has_no_blocking_finding(self):
         self.assertEqual(example_kinds("edi_row_rules.pdl"), Counter())

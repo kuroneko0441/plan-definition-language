@@ -413,6 +413,19 @@ class ExampleTest(unittest.TestCase):
             Counter({"DUPLICATE": 5, "UNDEFINED": 6, "UNKNOWN_STRUCTURE": 6}),
         )
 
+    def test_scope_and_edi_split_modules_have_no_holes(self):
+        for name in ("erp_scope.pdl", "edi_split.pdl"):
+            self.assertEqual(example_kinds(name), Counter(), name)
+
+    def test_code_request_flow_waits_for_two_undecided_structures(self):
+        self.assertEqual(example_kinds("code_request.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
+
+    def test_menus_wait_for_two_undecided_structures(self):
+        self.assertEqual(example_kinds("menus.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
+
+    def test_every_open_question_of_the_source_is_listed(self):
+        self.assertEqual(example_kinds("open_questions.pdl"), Counter({"UNKNOWN_STRUCTURE": 28}))
+
     def test_commission_waits_for_three_undecided_structures(self):
         self.assertEqual(example_kinds("commission.pdl"), Counter({"UNKNOWN_STRUCTURE": 3}))
 

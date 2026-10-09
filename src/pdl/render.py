@@ -2,7 +2,7 @@
 
 from itertools import product
 
-from .checks import Finding, Index, row_entities, triple_outcomes
+from .checks import Finding, Index, row_entities, rule_matches, triple_outcomes
 from .model import (
     And,
     Atom,
@@ -36,7 +36,7 @@ LABELS = {
         "matrix_note": "조건부는 행 상태나 업로드 상태 같은 조건에 따라 허용 여부가 달라진다는 뜻이며, 조건은 위의 규칙 문장을 따른다.",
         "terms": "용어",
         "cyclic": "끝나지 않고 처음 상태로 돌아가며 반복되는 흐름",
-        "basic_types": "기본 자료형은 Text(글자), Int(정수), Decimal(소수), Money(금액), Bool(참 또는 거짓), Timestamp(시각), Duration(기간), Day(일), Week(주), Month(월)이다.",
+        "basic_types": "기본 자료형은 Text(글자), Int(정수), Decimal(소수), Money(금액), Bool(참 또는 거짓), Timestamp(시각), Duration(기간), Day(일), Week(주), Month(월)이다. 시간 값은 next(다음), before(이전), month_of(일이 속한 월)로 계산하고, 자료형 뒤의 물음표는 비어 있을 수 있음을, list는 여러 개를 뜻한다.",
         "formulas": "식",
         "draft": "초안",
         "draft_note": "이 문서는 구멍이 남은 상태의 초안이며, 아래 구멍이 모두 해소되어야 확정된 기획서가 된다.",
@@ -140,8 +140,26 @@ LABELS = {
 }
 
 
+MINIMUM_DUPLICATE_LENGTH = 12
+
+
 def cell(text: str) -> str:
-    return text.replace("|", "\\|").replace("\n", " ") or " "
+    return text.replace("|", "\\|").replace("\n", " ") or "-"
+
+
+def dedupe_rationales(lines: list[str], labels: dict[str, str]) -> list[str]:
+    prefix = f"  - {labels['why']}: "
+    corpus = "\n".join(line for line in lines if not line.startswith("  - "))
+    seen: set[str] = set()
+    result = []
+    for line in lines:
+        if line.startswith(prefix):
+            text = line.removeprefix(prefix)
+            if (len(text) >= MINIMUM_DUPLICATE_LENGTH and text in corpus) or text in seen:
+                continue
+            seen.add(text)
+        result.append(line)
+    return result
 
 
 def table(headers: list[str], rows: list[list[str]]) -> list[str]:
@@ -271,7 +289,15 @@ def render_permissions(
                 elif effects == {frozenset({"forbid"})}:
                     result = labels["forbid"]
                 else:
-                    result = labels["conditional"]
+                    variables = sorted(
+                        {
+                            names.show(c.variable)
+                            for rule in module.rules
+                            if rule_matches(rule, actor, action, resource)
+                            for c in rule.conditions
+                        }
+                    )
+                    result = f"{labels['conditional']}({', '.join(variables)})"
                 entries.append(f"{names.show(resource)} {names.show(action)} {result}")
             lines.append(f"- {names.show(actor)}: {', '.join(entries)}")
         lines.append("")
@@ -329,10 +355,13 @@ def render_machines(
             if transition.why:
                 lines.append(f"  - {labels['why']}: {transition.why}")
         otherwise: dict[str, list[str]] = {}
+        otherwise_assumes: dict[str, list[str]] = {}
         for handling in machine.handlings:
             event = event_text(machine, handling.event)
             if handling.state == "*":
                 otherwise.setdefault(handling.kind, []).append(f"'{event}'")
+                known = otherwise_assumes.setdefault(handling.kind, [])
+                known.extend(name for name in handling.assumes if name not in known)
             else:
                 state = state_text(machine, handling.state)
                 note = assumption_text(handling.assumes, module, labels)
@@ -340,7 +369,8 @@ def render_machines(
                 if handling.why:
                     lines.append(f"  - {labels['why']}: {handling.why}")
         for kind, events in otherwise.items():
-            lines.append(f"- {labels['otherwise']} {labels[kind]}: {', '.join(events)}")
+            note = assumption_text(otherwise_assumes[kind], module, labels)
+            lines.append(f"- {labels['otherwise']} {labels[kind]}: {', '.join(events)}{note}")
         lines.append("")
     for scenario in module.scenarios:
         machine = machines.get(scenario.machine)
@@ -445,4 +475,4 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
     appendix += render_permissions(module, index, labels, names, language, summary=True)
     if appendix:
         lines += [f"## {labels['appendix']}", "", labels["appendix_note"], labels["basic_types"], ""] + appendix
-    return "\n".join(lines).rstrip() + "\n"
+    return "\n".join(dedupe_rationales(lines, labels)).rstrip() + "\n"

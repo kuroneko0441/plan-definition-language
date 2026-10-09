@@ -407,6 +407,12 @@ class ExampleTest(unittest.TestCase):
         self.assertIn("DealerHolds=Yes, Received=Provisional, UpstreamReply=NotAsked", message)
         self.assertIn("DealerHolds=No, Received=Nothing, UpstreamReply=Otherwise", message)
 
+    def test_the_database_section_has_duplicate_tables_and_dangling_references(self):
+        self.assertEqual(
+            example_kinds("erp_db_model.pdl"),
+            Counter({"DUPLICATE": 5, "UNDEFINED": 6, "UNKNOWN_STRUCTURE": 6}),
+        )
+
     def test_commission_waits_for_three_undecided_structures(self):
         self.assertEqual(example_kinds("commission.pdl"), Counter({"UNKNOWN_STRUCTURE": 3}))
 
@@ -443,15 +449,15 @@ class RenderTest(unittest.TestCase):
 
     def test_assumptions_are_marked_on_the_lines_that_depend_on_them(self):
         document = self.render_example("edi_row_rules.pdl")
-        self.assertEqual(document.count("(가정: 수정 작업을 하는 주체)"), 3)
+        self.assertEqual(document.count("(가정: 수정 작업을 하는 주체)"), 4)
         self.assertIn("(가정: 수정 작업을 하는 주체, 제약사 마감 후 두 대응이 서로 배타적인지)", document)
-        self.assertIn("(가정: 제약사의 입금이 늦어진 경우의 정산월)", document)
+        self.assertIn("(가정: 미결: 제약사의 입금이 늦어진 경우의 정산월(원문의 NEED EDIT))", document)
         self.assertIn("(가정: 목록 상태 구분과 행 상태의 관계)", document)
         self.assertIn(
             "- EDI팀은 제약사 마감 기록을 등록할 수 있다. (가정: 제약사 마감을 기록하는 주체)",
             document,
         )
-        self.assertIn("| 제약사의 입금이 늦어진 경우의 정산월 | 원문에서 아직 정해지지 않은 항목이며", document)
+        self.assertIn("| 미결: 제약사의 입금이 늦어진 경우의 정산월(원문의 NEED EDIT) | 원문에서 아직 정해지지 않은 항목이며", document)
 
     def test_scope_lines_139_to_142_are_kept(self):
         document = self.render_example("edi_row_rules.pdl")
@@ -493,11 +499,16 @@ class RenderTest(unittest.TestCase):
         self.assertIn("## 업무 흐름: 월별 EDI 업무", document)
         self.assertIn(
             "- '업로드 시작 전' 상태에서 '매달 업로드 시작'이 일어나면 '업로드와 입력 진행' 상태가 된다. "
-            "(주체: 매달 정해진 시점) (가정: 매달 업로드를 시작하는 주체)",
+            "(주체: 시작 주체 미정) (가정: 매달 업로드를 시작하는 주체)",
             document,
         )
         self.assertIn(
-            "- '제약사에 제출됨' 상태에서 '마감 전 재제출'이 일어나면 '제약사에 제출됨' 상태가 된다. (주체: EDI팀)",
+            "- '제약사에 제출됨' 상태에서 '마감 전 재제출'이 일어나면 '제약사에 제출됨' 상태가 된다. "
+            "(주체: EDI팀) (가정: 마감 해제와 재제출을 하는 주체)",
+            document,
+        )
+        self.assertIn(
+            "- '다음 제출월로 복사함' 상태에서 '누락분만 추가 제출'이 일어나면 '누락분을 추가 제출함' 상태가 된다.",
             document,
         )
         self.assertIn(
@@ -505,6 +516,7 @@ class RenderTest(unittest.TestCase):
             "'업로드 마감 해제', '제약사에 제출', '마감 전 재제출', '제약사 마감'",
             document,
         )
+        self.assertIn("(가정: 위 흐름에 적지 않은 사건은 일어나지 않는 것으로 본다)", document)
         self.assertIn("  - 근거: 매달 EDI 업로드가 시작되면 EDI팀은 입력을 시작한다.", document)
         self.assertIn('    state "업로드 마감" as Closed', document)
 

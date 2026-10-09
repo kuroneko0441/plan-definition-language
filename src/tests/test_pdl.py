@@ -270,6 +270,16 @@ class ExampleTest(unittest.TestCase):
         self.assertIn("DealerHolds=Yes, Received=Provisional, UpstreamReply=NotAsked", message)
         self.assertIn("DealerHolds=No, Received=Nothing, UpstreamReply=Otherwise", message)
 
+    def test_commission_waits_for_three_undecided_structures(self):
+        self.assertEqual(example_kinds("commission.pdl"), Counter({"UNKNOWN_STRUCTURE": 3}))
+
+    def test_hospital_size_split_waits_for_two_undecided_structures(self):
+        self.assertEqual(example_kinds("hospital_size_split.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
+
+    def test_history_transfer_audit_log_and_integration_have_no_holes(self):
+        for name in ("history_transfer.pdl", "audit_log.pdl", "external_integration.pdl"):
+            self.assertEqual(example_kinds(name), Counter(), name)
+
     def test_documented_issue_transitions_leave_user_set_states_open(self):
         kinds = example_kinds("issue_tracker.pdl")
         self.assertEqual(kinds["UNREACHABLE"], 2)

@@ -451,13 +451,27 @@ class RenderTest(unittest.TestCase):
         document = self.render_example("edi_row_rules.pdl")
         self.assertEqual(document.count("(가정: 수정 작업을 하는 주체)"), 4)
         self.assertIn("(가정: 수정 작업을 하는 주체, 제약사 마감 후 두 대응이 서로 배타적인지)", document)
-        self.assertIn("(가정: 미결: 제약사의 입금이 늦어진 경우의 정산월(원문의 NEED EDIT))", document)
+        self.assertIn(
+            "(미결 있음: 제약사의 입금이 늦어진 경우의 정산월은 원문에서 미정(ERP-PLANNING.md:142))", document
+        )
+        self.assertNotIn("(가정: 제약사의 입금이", document)
         self.assertIn("(가정: 목록 상태 구분과 행 상태의 관계)", document)
         self.assertIn(
             "- EDI팀은 제약사 마감 기록을 등록할 수 있다. (가정: 제약사 마감을 기록하는 주체)",
             document,
         )
-        self.assertIn("| 미결: 제약사의 입금이 늦어진 경우의 정산월(원문의 NEED EDIT) | 원문에서 아직 정해지지 않은 항목이며", document)
+        self.assertIn(
+            "| 제약사의 입금이 늦어진 경우의 정산월은 원문에서 미정(ERP-PLANNING.md:142) | 원문에서 아직 정해지지 않은 항목이며",
+            document,
+        )
+
+    def test_monthly_flow_is_cyclic_and_runs_per_pharma_and_month(self):
+        document = self.render_example("edi_row_rules.pdl")
+        self.assertIn("아래 흐름은 제약사별, 월별로 따로 진행되며 매달 반복된다.", document)
+        self.assertIn("- 끝나지 않고 처음 상태로 돌아가며 반복되는 흐름", document)
+        self.assertNotIn("- 끝:", document)
+        self.assertNotIn("--> [*]", document)
+        self.assertIn("(가정: 매달 업로드를 시작하는 주체, 수정이나 추가 제출을 마친 뒤의 흐름)", document)
 
     def test_scope_lines_139_to_142_are_kept(self):
         document = self.render_example("edi_row_rules.pdl")

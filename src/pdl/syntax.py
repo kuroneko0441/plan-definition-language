@@ -393,6 +393,7 @@ class Parser:
         line = self.expect("machine").line
         machine = Machine(line, self.word())
         machine.label = self.label()
+        machine.why = self.why()
         self.expect("{")
         while not self.accept("}"):
             token = self.peek()

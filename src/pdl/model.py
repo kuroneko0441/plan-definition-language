@@ -137,6 +137,7 @@ class Machine:
     state_labels: dict[str, str] = field(default_factory=dict)
     event_labels: dict[str, str] = field(default_factory=dict)
     cyclic: bool = False
+    why: str = ""
 
 
 @dataclass

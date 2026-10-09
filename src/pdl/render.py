@@ -31,6 +31,7 @@ LABELS = {
         "unverified": "확인이 필요한 가정",
         "unverified_note": "원문에 적혀 있지 않아 임시로 정한 내용이며, 현업 확인 전까지는 확정된 규칙이 아니다. 본문에서 이 가정에 기대는 줄에는 가정 표시를 붙였다.",
         "assumption": "가정",
+        "open_item": "미결 있음",
         "appendix": "부록",
         "appendix_note": "아래는 개발자를 위한 정리이다.",
         "matrix_note": "조건부는 행 상태나 업로드 상태 같은 조건에 따라 허용 여부가 달라진다는 뜻이며, 조건은 위의 규칙 문장을 따른다.",
@@ -86,6 +87,7 @@ LABELS = {
         "unverified": "Assumptions that need confirmation",
         "unverified_note": "These items are not stated in the source and were decided provisionally. Lines that depend on them carry an assumption mark.",
         "assumption": "assumption",
+        "open_item": "open item",
         "appendix": "Appendix",
         "appendix_note": "The tables below are for developers.",
         "matrix_note": "Conditional means the result depends on a condition stated in the rules above.",
@@ -242,13 +244,17 @@ def render_views(module: Module, labels: dict[str, str], names: Names, language:
 
 
 def assumption_text(assumes: list[str], module: Module, labels: dict[str, str]) -> str:
-    shown = [
-        unknown.attributes.get("label", unknown.identifier)
-        for name in assumes
-        for unknown in module.unknowns
-        if unknown.identifier == name
-    ]
-    return f" ({labels['assumption']}: {', '.join(shown)})" if shown else ""
+    found = [unknown for name in assumes for unknown in module.unknowns if unknown.identifier == name]
+    parts = []
+    for flag, key in ((False, "assumption"), (True, "open_item")):
+        shown = [
+            unknown.attributes.get("label", unknown.identifier)
+            for unknown in found
+            if (unknown.attributes.get("open") == "yes") == flag
+        ]
+        if shown:
+            parts.append(f" ({labels[key]}: {', '.join(shown)})")
+    return "".join(parts)
 
 
 def render_permissions(
@@ -318,7 +324,10 @@ def render_machines(
 
     for machine in module.machines:
         title = machine.label if language == "ko" and machine.label else machine.name
-        lines += [f"## {labels['machines']}: {title}", "", "```mermaid", "stateDiagram-v2"]
+        lines += [f"## {labels['machines']}: {title}", ""]
+        if machine.why:
+            lines += [machine.why, ""]
+        lines += ["```mermaid", "stateDiagram-v2"]
         for state in machine.states:
             if state_text(machine, state) != state:
                 lines.append(f'    state "{state_text(machine, state)}" as {state}')

@@ -1,6 +1,6 @@
 """Deterministic sentences for rules, built from labels and Korean particle rules."""
 
-from .model import Module, Rule
+from .model import Condition, Module, Rule
 
 HANGUL_FIRST = 0xAC00
 HANGUL_LAST = 0xD7A3
@@ -47,7 +47,8 @@ class Names:
 
     def field(self, entity: str, attribute: str) -> str:
         label = self.field_labels.get((entity, attribute))
-        return label or self.show(self.field_types.get((entity, attribute), attribute))
+        type_name = self.field_types.get((entity, attribute), attribute).removesuffix("?").removeprefix("list ")
+        return label or self.show(type_name)
 
     def value(self, variable: str, value: str) -> str:
         return self.value_labels.get((variable, value)) or value
@@ -65,6 +66,38 @@ def attach(text: str, with_consonant: str, without_consonant: str) -> str:
     return text + (with_consonant if has_final_consonant(text) else without_consonant)
 
 
+def korean_condition(conditions: list[Condition], names: Names) -> str:
+    phrases = []
+    for position, condition in enumerate(conditions):
+        last = position == len(conditions) - 1
+        subject = attach(names.show(condition.variable), "이", "가")
+        if condition.operator == "in":
+            options = " 또는 ".join(f"'{names.value(condition.variable, v)}'" for v in condition.values)
+            phrases.append(f"{subject} {options}" + ("일 때" if last else "이고"))
+        elif condition.operator == "!=":
+            shown = names.value(condition.variable, condition.value)
+            phrases.append(
+                f"{subject} '{shown}'" + ("이" if has_final_consonant(shown) else "가") + (" 아닐 때" if last else " 아니고")
+            )
+        else:
+            shown = names.value(condition.variable, condition.value)
+            phrases.append(f"{subject} '{shown}'" + ("일 때" if last else "이고"))
+    return " ".join(phrases)
+
+
+def english_condition(conditions: list[Condition], names: Names) -> str:
+    parts = []
+    for condition in conditions:
+        variable = names.show(condition.variable)
+        if condition.operator == "in":
+            parts.append(f"{variable} is one of {', '.join(condition.values)}")
+        elif condition.operator == "!=":
+            parts.append(f"{variable} is not {condition.value}")
+        else:
+            parts.append(f"{variable} is {names.value(condition.variable, condition.value)}")
+    return " and ".join(parts)
+
+
 def korean_sentence(rule: Rule, names: Names) -> str:
     permit = rule.effect == "permit"
     if rule.actor == "*":
@@ -77,13 +110,7 @@ def korean_sentence(rule: Rule, names: Names) -> str:
         predicate = f"{resource}에 대한 모든 동작을 {ending}"
     else:
         predicate = f"{attach(resource, '을', '를')} {names.show(rule.action)}{ending}"
-    clause = ""
-    if rule.conditions:
-        parts = [
-            f"{attach(names.show(c.variable), '이', '가')} '{names.value(c.variable, c.value)}'"
-            for c in rule.conditions
-        ]
-        clause = ", ".join(parts) + "일 때, "
+    clause = korean_condition(rule.conditions, names) + ", " if rule.conditions else ""
     sentence = f"{clause}{subject} {predicate}"
     if permit and rule.requires:
         sentence += f" 이때 {attach(names.show(rule.requires), '을', '를')} 입력해야 한다."
@@ -96,10 +123,7 @@ def english_sentence(rule: Rule, names: Names) -> str:
     modal = "may" if permit else "may not"
     resource = "any resource" if rule.resource == "*" else names.show(rule.resource)
     action = "do anything with" if rule.action == "*" else names.show(rule.action)
-    clause = ""
-    if rule.conditions:
-        parts = [f"{names.show(c.variable)} is {names.value(c.variable, c.value)}" for c in rule.conditions]
-        clause = "When " + " and ".join(parts) + ", "
+    clause = f"When {english_condition(rule.conditions, names)}, " if rule.conditions else ""
     sentence = f"{clause}{subject.lower() if clause and rule.actor == '*' else subject} {modal} {action} {resource}."
     if permit and rule.requires:
         sentence += f" A {names.show(rule.requires)} is required."

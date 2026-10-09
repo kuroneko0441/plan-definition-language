@@ -20,12 +20,17 @@ from .model import (
     Reference,
     Rule,
     Term,
+    Transition,
 )
 
 TIME_TYPES = ("Day", "Week", "Month")
-BUILTIN_TYPES = ("Text", "Int", "Bool", "Timestamp") + TIME_TYPES
+BUILTIN_TYPES = ("Text", "Int", "Bool", "Timestamp", "Decimal", "Money", "Duration") + TIME_TYPES
 ENUMERATION_LIMIT = 20000
 SAMPLE_LIMIT = 6
+
+
+def base_type(type_name: str) -> str:
+    return type_name.removesuffix("?")
 
 
 @dataclass
@@ -136,16 +141,19 @@ def free_enums(formula: Formula, index: Index, bound: frozenset[str] = frozenset
     return {term for term in terms if term in index.enums and term not in bound}
 
 
-def triple_outcomes(
-    module: Module, index: Index, actor: str, action: str, resource: str
-) -> list[Outcome] | None:
-    matching = [rule for rule in module.rules if rule_matches(rule, actor, action, resource)]
-    chosen = {
-        condition.variable
-        for rule in matching
-        for condition in rule.conditions
-        if condition.variable in index.enums
-    }
+def condition_holds(condition: Condition, assignment: dict[str, str]) -> bool:
+    current = assignment.get(condition.variable)
+    if current is None:
+        return False
+    if condition.operator == "in":
+        return current in condition.values
+    if condition.operator == "!=":
+        return current != condition.value
+    return current == condition.value
+
+
+def worlds(index: Index, variables: set[str]) -> list[dict[str, str]] | None:
+    chosen = set(variables)
     changed = True
     while changed:
         changed = False
@@ -153,29 +161,45 @@ def triple_outcomes(
             if enums & chosen and not enums <= chosen:
                 chosen |= enums
                 changed = True
-    variables = sorted(chosen)
-    domains = [index.enums[variable].values for variable in variables]
+    names = sorted(chosen)
+    domains = [index.enums[name].values for name in names]
     size = 1
     for domain in domains:
         size *= len(domain)
     if size > ENUMERATION_LIMIT:
         return None
-    outcomes = []
+    result = []
     for values in product(*domains):
-        assignment = dict(zip(variables, values))
-        if not all(
+        assignment = dict(zip(names, values))
+        if all(
             evaluate(formula, assignment, {}, index)
             for formula, enums in index.invariant_terms
             if enums and enums <= chosen
         ):
-            continue
-        applicable = [
-            rule
-            for rule in matching
-            if all(assignment.get(c.variable) == c.value for c in rule.conditions)
-        ]
-        outcomes.append(Outcome(assignment, applicable))
-    return outcomes
+            result.append(assignment)
+    return result
+
+
+def triple_outcomes(
+    module: Module, index: Index, actor: str, action: str, resource: str
+) -> list[Outcome] | None:
+    matching = [rule for rule in module.rules if rule_matches(rule, actor, action, resource)]
+    variables = {
+        condition.variable
+        for rule in matching
+        for condition in rule.conditions
+        if condition.variable in index.enums
+    }
+    assignments = worlds(index, variables)
+    if assignments is None:
+        return None
+    return [
+        Outcome(
+            assignment,
+            [rule for rule in matching if all(condition_holds(c, assignment) for c in rule.conditions)],
+        )
+        for assignment in assignments
+    ]
 
 
 def check(module: Module) -> list[Finding]:
@@ -226,7 +250,7 @@ def check_entities(module: Module, index: Index) -> list[Finding]:
                     )
                 )
         for field_name, type_name in entity.fields:
-            if type_name not in known_types:
+            if base_type(type_name).removeprefix("list ") not in known_types:
                 findings.append(
                     Finding(
                         "UNDEFINED",
@@ -241,8 +265,8 @@ def row_entities(module: Module, entity: str, source: str) -> list[str]:
     return [
         candidate.name
         for candidate in module.entities
-        if any(type_name == entity for _, type_name in candidate.fields)
-        and any(type_name == source for _, type_name in candidate.fields)
+        if any(base_type(type_name).removeprefix("list ") == entity for _, type_name in candidate.fields)
+        and any(base_type(type_name).removeprefix("list ") == source for _, type_name in candidate.fields)
     ]
 
 
@@ -354,9 +378,20 @@ def check_condition(condition: Condition, index: Index, line: int) -> list[Findi
     enum = index.enums.get(condition.variable)
     if enum is None:
         return [Finding("UNDEFINED", f"condition variable {condition.variable} is not an enum", line)]
-    if condition.value not in enum.values:
-        return [Finding("UNDEFINED", f"{condition.value} is not a value of {condition.variable}", line)]
-    return []
+    given = condition.values if condition.operator == "in" else [condition.value]
+    return [
+        Finding("UNDEFINED", f"{value} is not a value of {condition.variable}", line)
+        for value in given
+        if value not in enum.values
+    ]
+
+
+def check_assumptions(assumes: list[str], index: Index, line: int, owner: str) -> list[Finding]:
+    return [
+        Finding("UNDEFINED", f"assumption {name} of {owner} is not declared as unknown", line)
+        for name in assumes
+        if name not in index.unknown_ids
+    ]
 
 
 def check_actions(module: Module, index: Index) -> list[Finding]:
@@ -395,8 +430,7 @@ def check_rules(module: Module, index: Index) -> list[Finding]:
                 findings.append(Finding("UNDEFINED", f"{kind} {value} is not defined", rule.line))
         for condition in rule.conditions:
             findings.extend(check_condition(condition, index, rule.line))
-        if rule.assumes and rule.assumes not in index.unknown_ids:
-            findings.append(Finding("UNDEFINED", f"assumption {rule.assumes} is not declared as unknown", rule.line))
+        findings.extend(check_assumptions(rule.assumes, index, rule.line, "a rule"))
         if rule.requires and rule.requires not in index.entities and rule.requires not in index.enums:
             findings.append(
                 Finding("UNDEFINED", f"required item {rule.requires} is not defined", rule.line)
@@ -464,6 +498,54 @@ def reachable_from(start: str, edges: dict[str, set[str]]) -> set[str]:
     return seen
 
 
+def check_guards(
+    machine: Machine,
+    grouped: dict[tuple[str, str], list[Transition]],
+    else_covered: set[tuple[str, str]],
+    index: Index,
+) -> list[Finding]:
+    findings = []
+    for (state, event), group in grouped.items():
+        if len(group) == 1 and not group[0].conditions:
+            continue
+        label = f"{state} on {event}"
+        if len(group) > 1 and any(not transition.conditions for transition in group):
+            destinations = {transition.target for transition in group}
+            if len(destinations) > 1:
+                findings.append(
+                    Finding("CONTRADICTION", f"{label} leads to {', '.join(sorted(destinations))}", group[0].line)
+                )
+            continue
+        variables = {
+            condition.variable
+            for transition in group
+            for condition in transition.conditions
+            if condition.variable in index.enums
+        }
+        assignments = worlds(index, variables)
+        if assignments is None:
+            findings.append(Finding("TOO_LARGE", f"{label} has too many guard combinations to enumerate", group[0].line))
+            continue
+        conflicts = []
+        gaps = []
+        for assignment in assignments:
+            applicable = [t for t in group if all(condition_holds(c, assignment) for c in t.conditions)]
+            if len({t.target for t in applicable}) > 1:
+                conflicts.append(assignment)
+            elif not applicable and (state, event) not in else_covered:
+                gaps.append(assignment)
+        if conflicts:
+            findings.append(
+                Finding("CONTRADICTION", f"{label} leads to different states when {describe(conflicts[0])} ({len(conflicts)} combinations)", group[0].line)
+            )
+        if gaps:
+            listed = "; ".join(describe(a) for a in gaps[:SAMPLE_LIMIT])
+            findings.append(
+                Finding("UNCOVERED", f"{label} has no outcome when {listed} ({len(gaps)} combinations)", group[0].line)
+            )
+    return findings
+
+
 def check_machine(machine: Machine, index: Index) -> list[Finding]:
     findings = []
     states = set(machine.states)
@@ -473,14 +555,15 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
         findings.append(Finding("MISSING", f"machine {name} has no initial state", machine.line))
     elif machine.initial not in states:
         findings.append(Finding("UNDEFINED", f"initial state {machine.initial} is not a state", machine.line))
-    if not machine.terminals:
-        findings.append(Finding("MISSING", f"machine {name} has no terminal state", machine.line))
+    if not machine.terminals and not machine.cyclic:
+        findings.append(Finding("MISSING", f"machine {name} has no terminal state and is not cyclic", machine.line))
     for terminal in machine.terminals:
         if terminal not in states:
             findings.append(Finding("UNDEFINED", f"terminal state {terminal} is not a state", machine.line))
     forward: dict[str, set[str]] = {}
     backward: dict[str, set[str]] = {}
     targets: dict[tuple[str, str], set[str]] = {}
+    grouped: dict[tuple[str, str], list[Transition]] = {}
     for transition in machine.transitions:
         label = f"{transition.source} -> {transition.target} on {transition.event}"
         valid = True
@@ -491,41 +574,54 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
         if transition.event not in events:
             findings.append(Finding("UNDEFINED", f"event {transition.event} in {label} is not an event", transition.line))
             valid = False
-        if transition.assumes and transition.assumes not in index.unknown_ids:
-            findings.append(Finding("UNDEFINED", f"assumption {transition.assumes} of {label} is not declared as unknown", transition.line))
-        if not transition.actor:
+        findings.extend(check_assumptions(transition.assumes, index, transition.line, label))
+        if not transition.actors:
             findings.append(Finding("OWNERLESS", f"{label} has no actor", transition.line))
-        elif transition.actor not in index.actors:
-            findings.append(Finding("UNDEFINED", f"actor {transition.actor} in {label} is not defined", transition.line))
+        for actor in transition.actors:
+            if actor not in index.actors:
+                findings.append(Finding("UNDEFINED", f"actor {actor} in {label} is not defined", transition.line))
+        for condition in transition.conditions:
+            findings.extend(check_condition(condition, index, transition.line))
         if valid:
             forward.setdefault(transition.source, set()).add(transition.target)
             backward.setdefault(transition.target, set()).add(transition.source)
             targets.setdefault((transition.source, transition.event), set()).add(transition.target)
-    for (state, event), destinations in targets.items():
-        if len(destinations) > 1:
-            findings.append(
-                Finding("CONTRADICTION", f"{state} on {event} leads to {', '.join(sorted(destinations))}", machine.line)
-            )
+            grouped.setdefault((transition.source, transition.event), []).append(transition)
     handled = set(targets)
+    else_covered: set[tuple[str, str]] = set()
     for handling in machine.handlings:
         for kind, value, known in (("state", handling.state, states), ("event", handling.event, events)):
             if value != "*" and value not in known:
                 findings.append(Finding("UNDEFINED", f"{kind} {value} in {handling.kind} is not defined", handling.line))
-        if handling.state == "*":
-            handled |= {(state, handling.event) for state in states if (state, handling.event) not in targets}
-        elif (handling.state, handling.event) in targets:
-            findings.append(
-                Finding("CONTRADICTION", f"{handling.state} on {handling.event} is both a transition and {handling.kind}", handling.line)
-            )
-        else:
-            handled.add((handling.state, handling.event))
+        findings.extend(check_assumptions(handling.assumes, index, handling.line, handling.kind))
+        pairs = (
+            [(state, handling.event) for state in states]
+            if handling.state == "*"
+            else [(handling.state, handling.event)]
+        )
+        for pair in pairs:
+            group = grouped.get(pair)
+            if group is None:
+                handled.add(pair)
+            elif all(transition.conditions for transition in group):
+                else_covered.add(pair)
+            elif handling.state != "*":
+                findings.append(
+                    Finding("CONTRADICTION", f"{pair[0]} on {pair[1]} is both a transition and {handling.kind}", handling.line)
+                )
+    findings.extend(check_guards(machine, grouped, else_covered, index))
     if machine.initial in states:
         reachable = reachable_from(machine.initial, forward)
         for state in machine.states:
             if state not in reachable:
                 findings.append(Finding("UNREACHABLE", f"state {state} of {name} cannot be reached", machine.line))
     valid_terminals = [terminal for terminal in machine.terminals if terminal in states]
-    if valid_terminals:
+    if machine.cyclic and machine.initial in states:
+        can_return = reachable_from(machine.initial, backward)
+        for state in machine.states:
+            if state not in can_return:
+                findings.append(Finding("TRAP", f"state {state} of {name} cannot return to the initial state", machine.line))
+    elif valid_terminals:
         can_finish: set[str] = set()
         for terminal in valid_terminals:
             can_finish |= reachable_from(terminal, backward)
@@ -555,14 +651,19 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
         if machine is None:
             findings.append(Finding("UNDEFINED", f"machine {scenario.machine} is not defined", scenario.line))
             continue
-        destinations = {(t.source, t.event): t.target for t in machine.transitions}
+        given = {c.variable: c.value for c in scenario.given if c.operator == "="}
         ignored = {(h.state, h.event) for h in machine.handlings if h.kind == "ignore" and h.state != "*"}
         ignored_events = {h.event for h in machine.handlings if h.kind == "ignore" and h.state == "*"}
         state = scenario.start
         failed = False
         for event in scenario.events:
-            if (state, event) in destinations:
-                state = destinations[(state, event)]
+            applicable = [
+                t
+                for t in machine.transitions
+                if t.source == state and t.event == event and all(condition_holds(c, given) for c in t.conditions)
+            ]
+            if applicable:
+                state = applicable[0].target
             elif (state, event) in ignored or event in ignored_events:
                 continue
             else:
@@ -588,7 +689,7 @@ def term_type(term: Term, index: Index, line: int, findings: list[Finding]) -> s
         if term.attribute not in types:
             findings.append(Finding("UNDEFINED", f"{term.entity}.{term.attribute} is not a field", line))
             return None
-        return types[term.attribute]
+        return base_type(types[term.attribute])
     argument_type = term_type(term.argument, index, line, findings)
     if argument_type is None:
         return None
@@ -618,10 +719,25 @@ def check_laws(module: Module, index: Index) -> list[Finding]:
     return findings
 
 
+def referenced_unknowns(module: Module) -> set[str]:
+    referenced: set[str] = set()
+    for owner in (*module.rules, *module.laws, *module.screens, *module.derivations):
+        referenced.update(owner.assumes)
+    for machine in module.machines:
+        for item in (*machine.transitions, *machine.handlings):
+            referenced.update(item.assumes)
+    return referenced
+
+
 def check_unknowns(module: Module, index: Index) -> list[Finding]:
     findings = []
+    referenced = referenced_unknowns(module)
     for unknown in module.unknowns:
         attributes = unknown.attributes
+        if unknown.policy == "value" and unknown.identifier not in referenced:
+            findings.append(
+                Finding("UNREFERENCED", f"unknown {unknown.identifier} is not assumed by any rule, transition, law, screen, or derivation", unknown.line, blocking=False)
+            )
         title = unknown.identifier + (f" ({attributes['label']})" if "label" in attributes else "")
         if "source" not in attributes:
             findings.append(Finding("MISSING_SOURCE", f"unknown {unknown.identifier} has no source", unknown.line))

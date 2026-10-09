@@ -17,7 +17,14 @@ from .model import (
     Reference,
     Term,
 )
-from .prose import Names, attach, has_final_consonant, sentence
+from .prose import (
+    Names,
+    attach,
+    english_condition,
+    has_final_consonant,
+    korean_condition,
+    sentence,
+)
 
 LABELS = {
     "ko": {
@@ -28,7 +35,12 @@ LABELS = {
         "appendix_note": "아래는 개발자를 위한 정리이다.",
         "matrix_note": "조건부는 행 상태나 업로드 상태 같은 조건에 따라 허용 여부가 달라진다는 뜻이며, 조건은 위의 규칙 문장을 따른다.",
         "terms": "용어",
-        "derivations": "파생 상태",
+        "cyclic": "끝나지 않고 처음 상태로 돌아가며 반복되는 흐름",
+        "basic_types": "기본 자료형은 Text(글자), Int(정수), Decimal(소수), Money(금액), Bool(참 또는 거짓), Timestamp(시각), Duration(기간), Day(일), Week(주), Month(월)이다.",
+        "formulas": "식",
+        "draft": "초안",
+        "draft_note": "이 문서는 구멍이 남은 상태의 초안이며, 아래 구멍이 모두 해소되어야 확정된 기획서가 된다.",
+        "derivations": "상태 판정 규칙",
         "invariants": "항상 성립하는 조건",
         "screens": "화면",
         "enums": "열거형",
@@ -40,7 +52,7 @@ LABELS = {
         "passive": "권한 규칙을 두지 않은 엔티티",
         "rules": "권한 규칙",
         "matrix": "권한 요약",
-        "machines": "상태 머신",
+        "machines": "업무 흐름",
         "scenarios": "시나리오",
         "laws": "시간 규칙",
         "effect": "구분",
@@ -59,11 +71,11 @@ LABELS = {
         "to": "도착",
         "source": "출처",
         "provisional": "임시 값",
-        "terminal": "종결 상태",
-        "initial": "시작 상태",
+        "terminal": "끝",
+        "initial": "처음",
         "ignore": "무시한다",
-        "reject": "거부한다",
-        "otherwise": "위에 적은 경우 외의 상태에서 사건",
+        "reject": "받아들이지 않는다",
+        "otherwise": "위에 적은 경우가 아니면 다음 사건은",
         "start": "시작",
         "events": "사건 순서",
         "expect": "기대 상태",
@@ -78,7 +90,12 @@ LABELS = {
         "appendix_note": "The tables below are for developers.",
         "matrix_note": "Conditional means the result depends on a condition stated in the rules above.",
         "terms": "Terms",
-        "derivations": "Derived statuses",
+        "cyclic": "A flow that never ends and returns to the initial state",
+        "basic_types": "Basic types are Text, Int, Decimal, Money, Bool, Timestamp, Duration, Day, Week, and Month.",
+        "formulas": "Formulas",
+        "draft": "Draft",
+        "draft_note": "This document is a draft with open holes. It is not a final plan until all holes below are resolved.",
+        "derivations": "Status rules",
         "invariants": "Invariants",
         "screens": "Screens",
         "enums": "Enumerations",
@@ -90,7 +107,7 @@ LABELS = {
         "passive": "Entities outside permission rules",
         "rules": "Permission rules",
         "matrix": "Permission summary",
-        "machines": "State machines",
+        "machines": "Workflow",
         "scenarios": "Scenarios",
         "laws": "Time rules",
         "effect": "Effect",
@@ -113,7 +130,7 @@ LABELS = {
         "initial": "Initial state",
         "ignore": "ignored",
         "reject": "rejected",
-        "otherwise": "In states not listed above, events",
+        "otherwise": "Except for the cases above, these events are",
         "start": "Start",
         "events": "Event sequence",
         "expect": "Expected state",
@@ -166,18 +183,19 @@ def render_views(module: Module, labels: dict[str, str], names: Names, language:
     if module.derivations:
         lines += [f"## {labels['derivations']}", ""]
         for derivation in module.derivations:
-            rows = row_entities(module, derivation.entity, derivation.source)
+            rows = row_entities(module, derivation.entity, derivation.source) or ["?"]
             mixed = derivation.mixed_label if language == "ko" and derivation.mixed_label else derivation.mixed
+            note = assumption_text(derivation.assumes, module, labels)
             if language == "ko":
                 lines.append(
                     f"- {attach(names.show(derivation.name), '은', '는')} {names.show(derivation.entity)}에 속한 "
                     f"{names.show(rows[0])}들의 {attach(names.show(derivation.source), '이', '가')} 모두 같으면 "
-                    f"그 값이고, 서로 다르면 '{mixed}'이다."
+                    f"그 값이고, 서로 다르면 '{mixed}'이다.{note}"
                 )
             else:
                 lines.append(
                     f"- {derivation.name} of {derivation.entity} is the {derivation.source} shared by all its "
-                    f"{rows[0]} records when they agree, and {mixed} when they differ."
+                    f"{rows[0]} records when they agree, and {mixed} when they differ.{note}"
                 )
             if derivation.why:
                 lines.append(f"  - {labels['why']}: {derivation.why}")
@@ -193,24 +211,26 @@ def render_views(module: Module, labels: dict[str, str], names: Names, language:
                     items.append(shown if language == "ko" else item)
                 else:
                     items.append(names.show(item))
+            note = assumption_text(screen.assumes, module, labels)
             if language == "ko":
                 joined = ", ".join(items[:-1] + [attach(items[-1], "을", "를")])
-                lines.append(f"- {attach(names.show(screen.name), '은', '는')} {joined} 보여 준다.")
+                lines.append(f"- {attach(names.show(screen.name), '은', '는')} {joined} 보여 준다.{note}")
             else:
-                lines.append(f"- {names.show(screen.name)} shows {', '.join(items)}.")
+                lines.append(f"- {names.show(screen.name)} shows {', '.join(items)}.{note}")
             if screen.why:
                 lines.append(f"  - {labels['why']}: {screen.why}")
         lines.append("")
     return lines
 
 
-def assumption_text(assumes: str, module: Module, labels: dict[str, str]) -> str:
-    if not assumes:
-        return ""
-    for unknown in module.unknowns:
-        if unknown.identifier == assumes:
-            return f" ({labels['assumption']}: {unknown.attributes.get('label', assumes)})"
-    return ""
+def assumption_text(assumes: list[str], module: Module, labels: dict[str, str]) -> str:
+    shown = [
+        unknown.attributes.get("label", unknown.identifier)
+        for name in assumes
+        for unknown in module.unknowns
+        if unknown.identifier == name
+    ]
+    return f" ({labels['assumption']}: {', '.join(shown)})" if shown else ""
 
 
 def render_permissions(
@@ -239,24 +259,22 @@ def render_permissions(
     ]
     if pairs and index.internal_actors:
         lines += [f"### {labels['matrix']}", "", labels["matrix_note"], ""]
-        matrix = []
         for actor in sorted(index.internal_actors):
-            row = [names.show(actor)]
+            entries = []
             for action, resource in pairs:
                 if not index.applies(action, actor, resource):
-                    row.append("-")
                     continue
                 outcomes = triple_outcomes(module, index, actor, action, resource) or []
                 effects = {frozenset(rule.effect for rule in outcome.rules) for outcome in outcomes}
                 if effects == {frozenset({"permit"})}:
-                    row.append(labels["permit"])
+                    result = labels["permit"]
                 elif effects == {frozenset({"forbid"})}:
-                    row.append(labels["forbid"])
+                    result = labels["forbid"]
                 else:
-                    row.append(labels["conditional"])
-            matrix.append(row)
-        headers = [labels["actor"]] + [f"{names.show(r)} {names.show(a)}" for a, r in pairs]
-        lines += table(headers, matrix)
+                    result = labels["conditional"]
+                entries.append(f"{names.show(resource)} {names.show(action)} {result}")
+            lines.append(f"- {names.show(actor)}: {', '.join(entries)}")
+        lines.append("")
     return lines
 
 
@@ -280,29 +298,34 @@ def render_machines(
                 lines.append(f'    state "{state_text(machine, state)}" as {state}')
         lines.append(f"    [*] --> {machine.initial}")
         for transition in machine.transitions:
-            actor = f" ({names.show(transition.actor)})" if transition.actor else ""
+            actor = f" ({', '.join(names.show(a) for a in transition.actors)})" if transition.actors else ""
             event = event_text(machine, transition.event)
             lines.append(f"    {transition.source} --> {transition.target}: {event}{actor}")
         lines += [f"    {terminal} --> [*]" for terminal in machine.terminals]
         lines += ["```", ""]
         lines.append(f"- {labels['initial']}: {state_text(machine, machine.initial)}")
-        lines.append(
-            f"- {labels['terminal']}: {', '.join(state_text(machine, s) for s in machine.terminals)}"
-        )
+        if machine.terminals:
+            lines.append(
+                f"- {labels['terminal']}: {', '.join(state_text(machine, s) for s in machine.terminals)}"
+            )
+        if machine.cyclic:
+            lines.append(f"- {labels['cyclic']}")
         lines.append("")
         for transition in machine.transitions:
             source = state_text(machine, transition.source)
             target = state_text(machine, transition.target)
             event = event_text(machine, transition.event)
-            actor = names.show(transition.actor) if transition.actor else "-"
+            actor = ", ".join(names.show(a) for a in transition.actors) or "-"
             note = assumption_text(transition.assumes, module, labels)
             if language == "ko":
                 subject = f"'{event}'" + ("이" if has_final_consonant(event) else "가")
+                guard = korean_condition(transition.conditions, names) + " " if transition.conditions else ""
                 lines.append(
-                    f"- '{source}' 상태에서 {subject} 일어나면 '{target}' 상태가 된다. (주체: {actor}){note}"
+                    f"- '{source}' 상태에서 {guard}{subject} 일어나면 '{target}' 상태가 된다. (주체: {actor}){note}"
                 )
             else:
-                lines.append(f"- In {source}, {event} moves to {target}. (actor: {actor}){note}")
+                guard = f" when {english_condition(transition.conditions, names)}" if transition.conditions else ""
+                lines.append(f"- In {source}{guard}, {event} moves to {target}. (actor: {actor}){note}")
             if transition.why:
                 lines.append(f"  - {labels['why']}: {transition.why}")
         otherwise: dict[str, list[str]] = {}
@@ -312,9 +335,12 @@ def render_machines(
                 otherwise.setdefault(handling.kind, []).append(f"'{event}'")
             else:
                 state = state_text(machine, handling.state)
-                lines.append(f"- '{state}' + '{event}': {labels[handling.kind]}")
+                note = assumption_text(handling.assumes, module, labels)
+                lines.append(f"- '{state}' + '{event}': {labels[handling.kind]}{note}")
+                if handling.why:
+                    lines.append(f"  - {labels['why']}: {handling.why}")
         for kind, events in otherwise.items():
-            lines.append(f"- {labels['otherwise']} ({labels[kind]}): {', '.join(events)}")
+            lines.append(f"- {labels['otherwise']} {labels[kind]}: {', '.join(events)}")
         lines.append("")
     for scenario in module.scenarios:
         machine = machines.get(scenario.machine)
@@ -331,7 +357,7 @@ def render_machines(
     return lines
 
 
-def render(module: Module, findings: list[Finding], language: str = "ko") -> str:
+def render(module: Module, findings: list[Finding], language: str = "ko", draft: bool = False) -> str:
     labels = LABELS[language]
     index = Index(module)
     names = Names(module, language)
@@ -341,6 +367,10 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
 
     title = module.label if language == "ko" and module.label else module.name
     lines = [f"# {title}", ""]
+    if draft:
+        lines += [f"## {labels['draft']}", "", labels["draft_note"], ""]
+        lines += [f"- {finding.kind}: {finding.message}" for finding in findings if finding.blocking]
+        lines.append("")
     unverified = [finding for finding in findings if finding.kind == "UNVERIFIED"]
     if unverified:
         lines += [f"## {labels['unverified']}", "", labels["unverified_note"], ""]
@@ -361,8 +391,7 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
     if module.laws:
         lines += [f"## {labels['laws']}", ""]
         for law in module.laws:
-            formula = f"{term_text(law.left)} {law.operator} {term_text(law.right)}"
-            lines.append(f"- {law.why or law.identifier} (`{formula}`)")
+            lines.append(f"- {law.why or law.identifier}{assumption_text(law.assumes, module, labels)}")
         lines.append("")
     lines += render_machines(module, labels, names, language)
     lines += render_permissions(module, index, labels, names, language, summary=False)
@@ -370,9 +399,15 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
     if module.invariants:
         lines += [f"## {labels['invariants']}", ""]
         for invariant in module.invariants:
-            lines.append(f"- {invariant.why or invariant.name} (`{formula_text(invariant.formula)}`)")
+            lines.append(f"- {invariant.why or invariant.name}")
         lines.append("")
     appendix = []
+    formulas = [
+        f"- {law.identifier}: `{term_text(law.left)} {law.operator} {term_text(law.right)}`"
+        for law in module.laws
+    ] + [f"- {item.name}: `{formula_text(item.formula)}`" for item in module.invariants]
+    if formulas:
+        appendix += [f"### {labels['formulas']}", ""] + formulas + [""]
     if module.enums:
         appendix += [f"### {labels['enums']}", ""]
         appendix += table(
@@ -386,7 +421,8 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
                 for e in module.enums
             ],
         )
-    described = [e for e in module.entities if e.fields or e.why]
+    referenced = {t.removesuffix("?").removeprefix("list ") for e in module.entities for _, t in e.fields}
+    described = [e for e in module.entities if e.fields or e.name in referenced]
     if described:
         appendix += [f"### {labels['entities']}", ""]
         appendix += table(
@@ -408,5 +444,5 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
         )
     appendix += render_permissions(module, index, labels, names, language, summary=True)
     if appendix:
-        lines += [f"## {labels['appendix']}", "", labels["appendix_note"], ""] + appendix
+        lines += [f"## {labels['appendix']}", "", labels["appendix_note"], labels["basic_types"], ""] + appendix
     return "\n".join(lines).rstrip() + "\n"

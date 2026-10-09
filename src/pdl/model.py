@@ -7,7 +7,9 @@ from typing import Union
 @dataclass
 class Condition:
     variable: str
-    value: str
+    value: str = ""
+    operator: str = "="
+    values: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -51,6 +53,7 @@ class Derivation:
     label: str = ""
     mixed_label: str = ""
     why: str = ""
+    assumes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -61,6 +64,7 @@ class Screen:
     shows: list[str]
     label: str = ""
     why: str = ""
+    assumes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -83,7 +87,7 @@ class Rule:
     conditions: list[Condition]
     requires: str = ""
     why: str = ""
-    assumes: str = ""
+    assumes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -99,9 +103,14 @@ class Transition:
     source: str
     target: str
     event: str
-    actor: str = ""
+    actors: list[str] = field(default_factory=list)
     why: str = ""
-    assumes: str = ""
+    assumes: list[str] = field(default_factory=list)
+    conditions: list[Condition] = field(default_factory=list)
+
+    @property
+    def actor(self) -> str:
+        return ", ".join(self.actors)
 
 
 @dataclass
@@ -110,6 +119,8 @@ class Handling:
     kind: str
     state: str
     event: str
+    why: str = ""
+    assumes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -125,6 +136,7 @@ class Machine:
     label: str = ""
     state_labels: dict[str, str] = field(default_factory=dict)
     event_labels: dict[str, str] = field(default_factory=dict)
+    cyclic: bool = False
 
 
 @dataclass
@@ -135,6 +147,7 @@ class Scenario:
     start: str
     events: list[str]
     expect: str
+    given: list[Condition] = field(default_factory=list)
 
 
 @dataclass
@@ -168,6 +181,7 @@ class Law:
     operator: str
     right: Term
     why: str = ""
+    assumes: list[str] = field(default_factory=list)
 
 
 @dataclass

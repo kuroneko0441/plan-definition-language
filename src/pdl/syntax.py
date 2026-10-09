@@ -38,7 +38,7 @@ TOKEN_PATTERN = re.compile(
     r"(?P<space>\s+)"
     r"|(?P<comment>#[^\n]*)"
     r"|(?P<string>\"(?:[^\"\\]|\\.)*\")"
-    r"|(?P<symbol>->|→|<=|>=|≤|≥|=>|⇒|!=|≠|∧|∨|¬|∀|∈|[{}(),:=|*<>.;])"
+    r"|(?P<symbol>->|→|<=|>=|≤|≥|=>|⇒|!=|≠|∧|∨|¬|∀|∈|[{}(),:=|*<>.;?])"
     r"|(?P<word>\w+)"
 )
 SYMBOL_ALIASES = {"→": "->", "≤": "<=", "≥": ">=", "⇒": "=>", "≠": "!="}
@@ -148,6 +148,11 @@ class Parser:
             if not self.accept(","):
                 return items
 
+    def field_type(self) -> str:
+        prefix = "list " if self.accept("list") else ""
+        name = self.word()
+        return prefix + name + ("?" if self.accept("?") else "")
+
     def parenthesized_words(self) -> list[str]:
         self.expect("(")
         words = self.comma_words()
@@ -156,8 +161,26 @@ class Parser:
 
     def condition(self) -> Condition:
         variable = self.word()
-        self.expect("=")
-        return Condition(variable, self.word())
+        if self.accept("in"):
+            self.expect("{")
+            values = self.comma_words()
+            self.expect("}")
+            return Condition(variable, operator="in", values=values)
+        token = self.advance()
+        if token.kind == "string" or token.value not in ("=", "!="):
+            raise PdlSyntaxError(token.line, f"expected =, != or in but found {token.value!r}")
+        return Condition(variable, self.word(), token.value)
+
+    def conditions_after(self, keyword: str) -> list[Condition]:
+        conditions: list[Condition] = []
+        if self.accept(keyword):
+            conditions.append(self.condition())
+            while self.accept("and"):
+                conditions.append(self.condition())
+        return conditions
+
+    def assumptions(self) -> list[str]:
+        return self.comma_words() if self.accept("assuming") else []
 
     def module(self) -> Module:
         self.expect("module")
@@ -230,7 +253,7 @@ class Parser:
             while not self.accept("}"):
                 field_name = self.word()
                 self.expect(":")
-                fields.append((field_name, self.word()))
+                fields.append((field_name, self.field_type()))
                 field_label = self.label()
                 if field_label:
                     field_labels[field_name] = field_label
@@ -257,8 +280,9 @@ class Parser:
         mixed = self.word()
         following = self.peek()
         mixed_label = self.string() if following is not None and following.kind == "string" else ""
+        assumes = self.assumptions()
         module.derivations.append(
-            Derivation(line, name, entity, source, mixed, label, mixed_label, self.why())
+            Derivation(line, name, entity, source, mixed, label, mixed_label, self.why(), assumes)
         )
         module.definitions.append(("derive", name, line))
 
@@ -276,7 +300,8 @@ class Parser:
         shows = [self.shown_item()]
         while self.accept(","):
             shows.append(self.shown_item())
-        module.screens.append(Screen(line, name, entity, shows, label, self.why()))
+        assumes = self.assumptions()
+        module.screens.append(Screen(line, name, entity, shows, label, self.why(), assumes))
         module.definitions.append(("screen", name, line))
 
     def declaration(self, module: Module) -> None:
@@ -301,13 +326,9 @@ class Parser:
         actor = self.name_or_star()
         action = self.name_or_star()
         resource = self.name_or_star()
-        conditions: list[Condition] = []
-        if self.accept("when"):
-            conditions.append(self.condition())
-            while self.accept("and"):
-                conditions.append(self.condition())
+        conditions = self.conditions_after("when")
         requires = self.word() if self.accept("requires") else ""
-        assumes = self.word() if self.accept("assuming") else ""
+        assumes = self.assumptions()
         module.rules.append(
             Rule(token.line, token.value, actor, action, resource, conditions, requires, self.why(), assumes)
         )
@@ -395,21 +416,31 @@ class Parser:
                     machine.events.append(event)
                     if event_label:
                         machine.event_labels[event] = event_label
+            elif token.kind == "word" and token.value == "cyclic":
+                self.advance()
+                machine.cyclic = True
             elif token.kind == "word" and token.value in ("ignore", "reject"):
                 self.advance()
                 state = self.name_or_star()
                 self.expect("on")
-                machine.handlings.append(Handling(token.line, token.value, state, self.word()))
+                event = self.word()
+                assumes = self.assumptions()
+                machine.handlings.append(
+                    Handling(token.line, token.value, state, event, self.why(), assumes)
+                )
             else:
                 source = self.word()
                 self.expect("->")
                 target = self.word()
                 self.expect("on")
                 event = self.word()
-                actor = self.word() if self.accept("by") else ""
-                assumes = self.word() if self.accept("assuming") else ""
+                conditions = self.conditions_after("when")
+                actors = self.comma_words() if self.accept("by") else []
+                assumes = self.assumptions()
                 machine.transitions.append(
-                    Transition(token.line, source, target, event, actor, self.why(), assumes)
+                    Transition(
+                        token.line, source, target, event, actors, self.why(), assumes, conditions
+                    )
                 )
         module.machines.append(machine)
         module.definitions.append(("machine", machine.name, line))
@@ -422,12 +453,13 @@ class Parser:
         self.expect("{")
         self.expect("start")
         start = self.word()
+        given = self.conditions_after("given")
         self.expect("events")
         events = self.comma_words()
         self.expect("expect")
         expect = self.word()
         self.expect("}")
-        module.scenarios.append(Scenario(line, name, machine, start, events, expect))
+        module.scenarios.append(Scenario(line, name, machine, start, events, expect, given))
 
     def unknown(self, module: Module) -> None:
         line = self.expect("unknown").line
@@ -458,7 +490,8 @@ class Parser:
         if token.value not in COMPARISON_OPERATORS:
             raise PdlSyntaxError(token.line, f"expected a comparison but found {token.value!r}")
         right = self.term()
-        module.laws.append(Law(line, identifier, left, token.value, right, self.why()))
+        assumes = self.assumptions()
+        module.laws.append(Law(line, identifier, left, token.value, right, self.why(), assumes))
 
 
 def parse_module(text: str) -> Module:

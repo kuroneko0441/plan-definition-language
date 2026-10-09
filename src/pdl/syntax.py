@@ -150,6 +150,7 @@ class Parser:
     def module(self) -> Module:
         self.expect("module")
         module = Module(name=self.word())
+        module.label = self.label()
         statements = {
             "term": self.glossary,
             "enum": self.enum,

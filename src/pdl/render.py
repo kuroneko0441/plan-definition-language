@@ -16,7 +16,7 @@ LABELS = {
         "key": "유일성 키",
         "fields": "필드",
         "values": "값",
-        "passive": "권한 규칙 범위 밖 엔티티",
+        "passive": "권한 규칙을 두지 않은 엔티티",
         "rules": "권한 규칙",
         "matrix": "권한 요약",
         "machines": "상태 머신",
@@ -42,7 +42,7 @@ LABELS = {
         "initial": "시작 상태",
         "ignore": "무시한다",
         "reject": "거부한다",
-        "otherwise": "그 밖의 모든 상태에서 사건",
+        "otherwise": "위에 적은 경우 외의 상태에서 사건",
         "start": "시작",
         "events": "사건 순서",
         "expect": "기대 상태",
@@ -84,7 +84,7 @@ LABELS = {
         "initial": "Initial state",
         "ignore": "ignored",
         "reject": "rejected",
-        "otherwise": "In every other state, event",
+        "otherwise": "In states not listed above, events",
         "start": "Start",
         "events": "Event sequence",
         "expect": "Expected state",
@@ -192,13 +192,16 @@ def render_machines(
                 lines.append(f"- In {source}, {event} moves to {target}. (actor: {actor})")
             if transition.why:
                 lines.append(f"  - {labels['why']}: {transition.why}")
+        otherwise: dict[str, list[str]] = {}
         for handling in machine.handlings:
             event = event_text(machine, handling.event)
-            outcome = labels[handling.kind]
             if handling.state == "*":
-                lines.append(f"- {labels['otherwise']} '{event}': {outcome}")
+                otherwise.setdefault(handling.kind, []).append(f"'{event}'")
             else:
-                lines.append(f"- '{state_text(machine, handling.state)}' + '{event}': {outcome}")
+                state = state_text(machine, handling.state)
+                lines.append(f"- '{state}' + '{event}': {labels[handling.kind]}")
+        for kind, events in otherwise.items():
+            lines.append(f"- {labels['otherwise']} ({labels[kind]}): {', '.join(events)}")
         lines.append("")
     for scenario in module.scenarios:
         machine = machines.get(scenario.machine)
@@ -223,12 +226,17 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
     def titled(name: str) -> str:
         return f"{names.show(name)} ({name})" if names.show(name) != name else name
 
-    lines = [f"# {module.name}", ""]
+    title = module.label if language == "ko" and module.label else module.name
+    lines = [f"# {title}", ""]
     unverified = [finding for finding in findings if finding.kind == "UNVERIFIED"]
     if unverified:
         lines += [f"## {labels['unverified']}", ""]
         rows = [
-            [u.identifier, u.attributes.get("provisional", ""), u.attributes.get("source", "")]
+            [
+                u.attributes.get("label", u.identifier),
+                u.attributes.get("provisional", ""),
+                u.attributes.get("source", ""),
+            ]
             for u in module.unknowns
             if u.policy == "value" and u.attributes.get("verified") != "yes"
         ]

@@ -209,10 +209,12 @@ class RenderTest(unittest.TestCase):
     def test_permission_matrix_and_rationale_are_rendered(self):
         document = self.render_example("edi_row_rules.pdl")
         self.assertIn("## 권한 규칙", document)
-        self.assertIn("| 딜러 | - | - | - | 조건부 |", document)
-        self.assertIn("| EDI팀 | 조건부 | 허용 | 허용 | - |", document)
+        self.assertIn("| 딜러 | - | - | - | - | 조건부 |", document)
+        self.assertIn("| EDI팀 | 조건부 | 허용 | 허용 | 허용 | - |", document)
         self.assertIn("정산된 행은 수정할 수 없다.", document)
-        self.assertIn("권한 규칙 범위 밖 엔티티: 제약사, 수정 사유", document)
+        self.assertIn("권한 규칙을 두지 않은 엔티티: 제약사, 수정 사유, 수정 이력", document)
+        self.assertIn("# EDI 업로드, 제출, 행 수정 규칙", document)
+        self.assertIn("- EDI팀은 업로드 마감을 설정하거나 해제할 수 있다.", document)
 
     def test_terms_and_field_notes_are_rendered(self):
         document = self.render_example("edi_row_rules.pdl")
@@ -244,7 +246,11 @@ class RenderTest(unittest.TestCase):
         document = self.render_example("edi_row_rules.pdl")
         self.assertIn("## 상태 머신: 월별 EDI 업무", document)
         self.assertIn(
-            "- '업로드 시작 전' 상태에서 '매달 업로드 시작' 사건이 일어나면 '업로드와 입력 진행' 상태가 된다. (주체: 달력)",
+            "- '업로드 시작 전' 상태에서 '매달 업로드 시작' 사건이 일어나면 '업로드와 입력 진행' 상태가 된다. (주체: 매달 정해진 시점)",
+            document,
+        )
+        self.assertIn(
+            "- 위에 적은 경우 외의 상태에서 사건 (거부한다): '매달 업로드 시작', '업로드 마감 설정', '업로드 마감 해제', '제약사에 제출'",
             document,
         )
         self.assertIn("  - 근거: 매달 EDI 업로드가 시작되면 EDI팀은 입력을 시작한다.", document)
@@ -259,7 +265,14 @@ class RenderTest(unittest.TestCase):
     def test_unverified_assumption_is_listed(self):
         document = self.render_example("edi_row_rules.pdl")
         self.assertIn("## 미검증 임시 결정", document)
-        self.assertIn("submission_before_close", document)
+        self.assertIn("| 업로드 마감 전 제약사 제출 | 업로드 마감 전에는 제약사에 제출하지 않는다 | ERP-PLANNING.md:235 |", document)
+        self.assertIn("| 제약사 마감을 기록하는 주체 | EDI팀 | ERP-PLANNING.md:237 |", document)
+
+    def test_examples_from_the_source_section_are_kept(self):
+        document = self.render_example("edi_row_rules.pdl")
+        self.assertIn("타이레놀 5개와 우루사 3개", document)
+        self.assertIn("변경 전후 값, 수정 사유, 수정자와 시각을 이력으로 기록한다", document)
+        self.assertIn("edited_at: Timestamp - 수정 시각이다.", document)
 
     def test_machine_is_rendered_as_a_diagram(self):
         module = parse_module(COVERED_MACHINE)

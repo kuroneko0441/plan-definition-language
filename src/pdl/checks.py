@@ -7,7 +7,7 @@ from itertools import product
 from .model import Call, Condition, Exclusion, Machine, Module, Reference, Rule, Term
 
 TIME_TYPES = ("Day", "Week", "Month")
-BUILTIN_TYPES = ("Text", "Int", "Bool") + TIME_TYPES
+BUILTIN_TYPES = ("Text", "Int", "Bool", "Timestamp") + TIME_TYPES
 ENUMERATION_LIMIT = 20000
 
 

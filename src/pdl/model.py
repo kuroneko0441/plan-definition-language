@@ -148,6 +148,7 @@ class Law:
 @dataclass
 class Module:
     name: str
+    label: str = ""
     definitions: list[tuple[str, str, int]] = field(default_factory=list)
     terms: list[TermDefinition] = field(default_factory=list)
     enums: list[EnumDefinition] = field(default_factory=list)

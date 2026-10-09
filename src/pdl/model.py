@@ -158,6 +158,15 @@ class Scenario:
 
 
 @dataclass
+class JointScenario:
+    line: int
+    name: str
+    start: dict[str, str]
+    events: list[tuple[str, str]]
+    expect: dict[str, str]
+
+
+@dataclass
 class Unknown:
     line: int
     policy: str
@@ -260,5 +269,6 @@ class Module:
     invariants: list[Invariant] = field(default_factory=list)
     machines: list[Machine] = field(default_factory=list)
     scenarios: list[Scenario] = field(default_factory=list)
+    joint_scenarios: list[JointScenario] = field(default_factory=list)
     unknowns: list[Unknown] = field(default_factory=list)
     laws: list[Law] = field(default_factory=list)

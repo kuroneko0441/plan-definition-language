@@ -522,6 +522,35 @@ class GuardedHandlingTest(unittest.TestCase):
         self.assertIn("'A' + 'E': 무시한다 (S가 'Off'일 때)", render(module, check(module), "ko"))
 
 
+GUARDED_PAIR = CROSS_MACHINES.replace(
+    "Open -> Done on Finish by Ext", "Open -> Done on Finish when P = Ok by Ext\nignore Open on Finish"
+).replace("Ok -> Bad on Fail by Ext\nignore Bad", "Ok -> Bad on Fail when T = Open by Ext\nignore Ok on Fail\nignore Bad")
+
+
+class JointScenarioTest(unittest.TestCase):
+    def kinds(self, scenario: str) -> Counter:
+        return blocking_kinds(GUARDED_PAIR + scenario + "\n")
+
+    def test_events_on_two_machines_follow_each_others_guards(self):
+        self.assertEqual(self.kinds("scenario s together { start P = Ok, T = Open events P.Fail, T.Finish expect P = Bad, T = Open }"), Counter())
+        self.assertEqual(self.kinds("scenario s together { start P = Ok, T = Open events T.Finish, P.Fail expect P = Ok, T = Done }"), Counter())
+
+    def test_a_wrong_end_state_fails_the_scenario(self):
+        text = "scenario s together { start P = Bad, T = Open events T.Finish expect P = Bad, T = Done }"
+        self.assertEqual(self.kinds(text), Counter({"SCENARIO_FAILED": 1}))
+
+    def test_unknown_machines_states_and_events_are_undefined(self):
+        self.assertEqual(self.kinds("scenario s together { start Q = Ok events Q.Fail expect Q = Ok }")["UNDEFINED"], 1)
+        self.assertEqual(self.kinds("scenario s together { start P = Ok events P.Nope expect P = Ok }")["UNDEFINED"], 1)
+        self.assertEqual(self.kinds("scenario s together { start P = Ok events T.Finish expect P = Ok }")["UNDEFINED"], 1)
+
+    def test_the_joint_scenario_is_rendered(self):
+        module = parse_module(GUARDED_PAIR + "scenario s together { start P = Ok, T = Open events P.Fail expect P = Bad }\n")
+        document = render(module, check(module), "en")
+        self.assertIn("- Start: P = Ok, T = Open", document)
+        self.assertIn("- Event sequence: P: Fail", document)
+
+
 class ExampleTest(unittest.TestCase):
     def test_negative_control_has_no_blocking_finding(self):
         self.assertEqual(example_kinds("edi_row_rules.pdl"), Counter())

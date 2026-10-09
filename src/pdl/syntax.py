@@ -27,6 +27,7 @@ from .model import (
     Or,
     Reference,
     Rule,
+    JointScenario,
     Scenario,
     Screen,
     Term,
@@ -485,6 +486,9 @@ class Parser:
     def scenario(self, module: Module) -> None:
         line = self.expect("scenario").line
         name = self.word()
+        if self.accept("together"):
+            self.joint_scenario(module, line, name)
+            return
         self.expect("on")
         machine = self.word()
         self.expect("{")
@@ -497,6 +501,32 @@ class Parser:
         expect = self.word()
         self.expect("}")
         module.scenarios.append(Scenario(line, name, machine, start, events, expect, given))
+
+    def machine_states(self) -> dict[str, str]:
+        states: dict[str, str] = {}
+        while True:
+            machine = self.word()
+            self.expect("=")
+            states[machine] = self.word()
+            if not self.accept(","):
+                return states
+
+    def joint_scenario(self, module: Module, line: int, name: str) -> None:
+        self.expect("{")
+        self.expect("start")
+        start = self.machine_states()
+        self.expect("events")
+        events: list[tuple[str, str]] = []
+        while True:
+            machine = self.word()
+            self.expect(".")
+            events.append((machine, self.word()))
+            if not self.accept(","):
+                break
+        self.expect("expect")
+        expect = self.machine_states()
+        self.expect("}")
+        module.joint_scenarios.append(JointScenario(line, name, start, events, expect))
 
     def unknown(self, module: Module) -> None:
         line = self.expect("unknown").line

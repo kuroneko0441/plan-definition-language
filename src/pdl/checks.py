@@ -224,6 +224,7 @@ def check(module: Module) -> list[Finding]:
         check_system,
         check_enums,
         check_scenarios,
+        check_joint_scenarios,
         check_laws,
         check_unknowns,
     ):
@@ -805,6 +806,77 @@ def check_machines(module: Module, index: Index) -> list[Finding]:
     return findings
 
 
+def scenario_step(machine: Machine, state: str, event: str, world: dict[str, str]) -> tuple[str, Transition | None]:
+    applicable = [
+        t
+        for t in machine.transitions
+        if t.source == state and t.event == event and all(condition_holds(c, world) for c in t.conditions)
+    ]
+    if applicable:
+        return "moved", applicable[0]
+    ignored = any(
+        h.kind == "ignore"
+        and h.event == event
+        and h.state in (state, "*")
+        and all(condition_holds(c, world) for c in h.conditions)
+        for h in machine.handlings
+    )
+    return ("ignored" if ignored else "refused"), None
+
+
+def apply_effects(transition: Transition, counters: dict[str, int]) -> None:
+    for counter, operator, amount in transition.effects:
+        if counter in counters:
+            counters[counter] = amount if operator == "=" else counters[counter] + amount
+
+
+def check_joint_scenarios(module: Module, index: Index) -> list[Finding]:
+    findings = []
+    for scenario in module.joint_scenarios:
+        names = {*scenario.start, *scenario.expect, *(machine for machine, _ in scenario.events)}
+        unknown = sorted(name for name in names if name not in index.machines)
+        if unknown:
+            findings.append(Finding("UNDEFINED", f"scenario {scenario.name} names {', '.join(unknown)}, which is not a machine", scenario.line))
+            continue
+        problems = []
+        for machine_name, state in (*scenario.start.items(), *scenario.expect.items()):
+            if state not in index.machines[machine_name].states:
+                problems.append(f"{state} is not a state of {machine_name}")
+        for machine_name, event in scenario.events:
+            if event not in index.machines[machine_name].events:
+                problems.append(f"{event} is not an event of {machine_name}")
+        missing = [name for name in index.machines if name in names and name not in scenario.start]
+        problems += [f"{name} has no start state" for name in missing]
+        if problems:
+            findings.append(Finding("UNDEFINED", f"scenario {scenario.name}: {'; '.join(problems)}", scenario.line))
+            continue
+        states = dict(scenario.start)
+        counters = {counter: 0 for name in states for counter in index.machines[name].counters}
+        failed = False
+        for machine_name, event in scenario.events:
+            machine = index.machines[machine_name]
+            world = {**states, **{counter: str(value) for counter, value in counters.items()}}
+            outcome, transition = scenario_step(machine, states[machine_name], event, world)
+            if transition is not None:
+                states[machine_name] = transition.target
+                apply_effects(transition, counters)
+            elif outcome != "ignored":
+                findings.append(
+                    Finding(
+                        "SCENARIO_FAILED",
+                        f"scenario {scenario.name}: {machine_name}.{event} is not accepted in {states[machine_name]} ({describe(world)})",
+                        scenario.line,
+                    )
+                )
+                failed = True
+                break
+        if not failed:
+            differing = [f"{name} is {states[name]} instead of {state}" for name, state in scenario.expect.items() if states[name] != state]
+            if differing:
+                findings.append(Finding("SCENARIO_FAILED", f"scenario {scenario.name} ends with {'; '.join(differing)}", scenario.line))
+    return findings
+
+
 def check_scenarios(module: Module, index: Index) -> list[Finding]:
     findings = []
     for scenario in module.scenarios:
@@ -818,23 +890,11 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
         failed = False
         for event in scenario.events:
             world = {**given, **{counter: str(value) for counter, value in counters.items()}}
-            applicable = [
-                t
-                for t in machine.transitions
-                if t.source == state and t.event == event and all(condition_holds(c, world) for c in t.conditions)
-            ]
-            if applicable:
-                state = applicable[0].target
-                for counter, operator, amount in applicable[0].effects:
-                    if counter in counters:
-                        counters[counter] = amount if operator == "=" else counters[counter] + amount
-            elif any(
-                h.kind == "ignore"
-                and h.event == event
-                and h.state in (state, "*")
-                and all(condition_holds(c, world) for c in h.conditions)
-                for h in machine.handlings
-            ):
+            outcome, transition = scenario_step(machine, state, event, world)
+            if transition is not None:
+                state = transition.target
+                apply_effects(transition, counters)
+            elif outcome == "ignored":
                 continue
             else:
                 findings.append(

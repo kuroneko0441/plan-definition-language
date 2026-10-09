@@ -423,6 +423,26 @@ def render_machines(
             f"- {labels['expect']}: {state_text(machine, scenario.expect)}",
             "",
         ]
+
+    def joint_states(states: dict[str, str]) -> str:
+        return ", ".join(
+            f"{names.show(name)} = {state_text(machines[name], state) if name in machines else state}"
+            for name, state in states.items()
+        )
+
+    for scenario in module.joint_scenarios:
+        shown_events = ", ".join(
+            f"{names.show(name)}: {event_text(machines[name], event) if name in machines else event}"
+            for name, event in scenario.events
+        )
+        lines += [
+            f"### {labels['scenarios']}: {scenario.name}",
+            "",
+            f"- {labels['start']}: {joint_states(scenario.start)}",
+            f"- {labels['events']}: {shown_events}",
+            f"- {labels['expect']}: {joint_states(scenario.expect)}",
+            "",
+        ]
     return lines
 
 

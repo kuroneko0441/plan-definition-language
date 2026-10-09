@@ -7,6 +7,7 @@ from .model import (
     Call,
     Condition,
     Declaration,
+    Derivation,
     EntityDefinition,
     EnumDefinition,
     Exclusion,
@@ -17,6 +18,7 @@ from .model import (
     Reference,
     Rule,
     Scenario,
+    Screen,
     Term,
     TermDefinition,
     Transition,
@@ -155,6 +157,8 @@ class Parser:
             "term": self.glossary,
             "enum": self.enum,
             "entity": self.entity,
+            "derive": self.derive,
+            "screen": self.screen,
             "actor": self.declaration,
             "action": self.declaration,
             "external": self.declaration,
@@ -223,6 +227,40 @@ class Parser:
             EntityDefinition(line, name, key, passive, fields, self.why(), label, field_notes)
         )
         module.definitions.append(("entity", name, line))
+
+    def derive(self, module: Module) -> None:
+        line = self.expect("derive").line
+        name = self.word()
+        label = self.label()
+        self.expect("of")
+        entity = self.word()
+        self.expect("from")
+        source = self.word()
+        self.expect("mixed")
+        mixed = self.word()
+        following = self.peek()
+        mixed_label = self.string() if following is not None and following.kind == "string" else ""
+        module.derivations.append(
+            Derivation(line, name, entity, source, mixed, label, mixed_label, self.why())
+        )
+        module.definitions.append(("derive", name, line))
+
+    def shown_item(self) -> str:
+        name = self.word()
+        return f"{name}.{self.word()}" if self.accept(".") else name
+
+    def screen(self, module: Module) -> None:
+        line = self.expect("screen").line
+        name = self.word()
+        label = self.label()
+        self.expect("of")
+        entity = self.word()
+        self.expect("shows")
+        shows = [self.shown_item()]
+        while self.accept(","):
+            shows.append(self.shown_item())
+        module.screens.append(Screen(line, name, entity, shows, label, self.why()))
+        module.definitions.append(("screen", name, line))
 
     def declaration(self, module: Module) -> None:
         token = self.advance()

@@ -2,14 +2,16 @@
 
 from itertools import product
 
-from .checks import Finding, Index, triple_outcomes
+from .checks import Finding, Index, row_entities, triple_outcomes
 from .model import Machine, Module, Reference, Term
-from .prose import Names, sentence
+from .prose import Names, attach, sentence
 
 LABELS = {
     "ko": {
         "unverified": "미검증 임시 결정",
         "terms": "용어",
+        "derivations": "파생 상태",
+        "screens": "화면",
         "enums": "열거형",
         "entities": "엔티티",
         "name": "이름",
@@ -52,6 +54,8 @@ LABELS = {
     "en": {
         "unverified": "Unverified provisional decisions",
         "terms": "Terms",
+        "derivations": "Derived statuses",
+        "screens": "Screens",
         "enums": "Enumerations",
         "entities": "Entities",
         "name": "Name",
@@ -108,6 +112,50 @@ def term_text(term: Term) -> str:
     if isinstance(term, Reference):
         return f"{term.entity}.{term.attribute}"
     return f"{term.function}({term_text(term.argument)})"
+
+
+def render_views(module: Module, labels: dict[str, str], names: Names, language: str) -> list[str]:
+    lines: list[str] = []
+    if module.derivations:
+        lines += [f"## {labels['derivations']}", ""]
+        for derivation in module.derivations:
+            rows = row_entities(module, derivation.entity, derivation.source)
+            mixed = derivation.mixed_label if language == "ko" and derivation.mixed_label else derivation.mixed
+            if language == "ko":
+                lines.append(
+                    f"- {attach(names.show(derivation.name), '은', '는')} {names.show(derivation.entity)}에 속한 "
+                    f"{names.show(rows[0])}들의 {attach(names.show(derivation.source), '이', '가')} 모두 같으면 "
+                    f"그 값이고, 서로 다르면 '{mixed}'이다."
+                )
+            else:
+                lines.append(
+                    f"- {derivation.name} of {derivation.entity} is the {derivation.source} shared by all its "
+                    f"{rows[0]} records when they agree, and {mixed} when they differ."
+                )
+            if derivation.why:
+                lines.append(f"  - {labels['why']}: {derivation.why}")
+        lines.append("")
+    if module.screens:
+        lines += [f"## {labels['screens']}", ""]
+        types = {(e.name, field_name): type_name for e in module.entities for field_name, type_name in e.fields}
+        for screen in module.screens:
+            items = []
+            for item in screen.shows:
+                if "." in item:
+                    entity_name, attribute = item.split(".", 1)
+                    shown = f"{names.show(entity_name)}의 {names.show(types[(entity_name, attribute)])}"
+                    items.append(shown if language == "ko" else item)
+                else:
+                    items.append(names.show(item))
+            if language == "ko":
+                joined = ", ".join(items[:-1] + [attach(items[-1], "을", "를")])
+                lines.append(f"- {attach(names.show(screen.name), '은', '는')} {joined} 보여 준다.")
+            else:
+                lines.append(f"- {names.show(screen.name)} shows {', '.join(items)}.")
+            if screen.why:
+                lines.append(f"  - {labels['why']}: {screen.why}")
+        lines.append("")
+    return lines
 
 
 def render_permissions(
@@ -278,6 +326,7 @@ def render(module: Module, findings: list[Finding], language: str = "ko") -> str
         passive = [names.show(e.name) for e in module.entities if e.passive]
         if passive:
             lines += [f"- {labels['passive']}: {', '.join(passive)}", ""]
+    lines += render_views(module, labels, names, language)
     lines += render_permissions(module, index, labels, names, language)
     lines += render_machines(module, labels, names, language)
     if module.laws:

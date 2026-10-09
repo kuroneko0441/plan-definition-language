@@ -36,6 +36,9 @@ scenario reaches_end on M {
 """
 
 
+LINKED = "module m\nenum S = A | B\nentity Parent\nentity Child { parent: Parent\nstate: S }\n"
+
+
 class SeededHoleTest(unittest.TestCase):
     def test_undefined_key_field(self):
         text = "module m\nentity A key (missing) { id: Text }"
@@ -120,6 +123,22 @@ class SeededHoleTest(unittest.TestCase):
     def test_term_name_cannot_repeat_an_action_name(self):
         text = "module m\nterm Do why \"x\"\naction Do"
         self.assertEqual(blocking_kinds(text), Counter({"DUPLICATE": 1}))
+
+    def test_derived_status_and_screen_pass_when_linked(self):
+        text = LINKED + "derive D of Parent from S mixed Mixed\nscreen V of Parent shows D, S, Child.state"
+        self.assertEqual(blocking_kinds(text), Counter())
+
+    def test_derived_status_needs_rows_that_link_the_entity_to_the_enum(self):
+        text = "module m\nenum S = A | B\nentity Parent\nderive D of Parent from S mixed Mixed"
+        self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 1}))
+
+    def test_mixed_value_cannot_repeat_an_enum_value(self):
+        text = LINKED + "derive D of Parent from S mixed A"
+        self.assertEqual(blocking_kinds(text), Counter({"DUPLICATE": 1}))
+
+    def test_screen_cannot_show_undefined_items(self):
+        text = LINKED + "screen V of Parent shows Nothing, Child.nothing"
+        self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 2}))
 
     def test_syntax_error_reports_the_line(self):
         with self.assertRaises(PdlSyntaxError) as raised:
@@ -256,11 +275,19 @@ class RenderTest(unittest.TestCase):
         self.assertIn("  - 근거: 매달 EDI 업로드가 시작되면 EDI팀은 입력을 시작한다.", document)
         self.assertIn('    state "업로드 마감" as Closed', document)
 
-    def test_mixed_state_and_list_content_are_rendered(self):
+    def test_mixed_state_is_a_derived_status_and_lists_are_screens(self):
         document = self.render_example("edi_row_rules.pdl")
-        self.assertIn("- 혼합 상태: EDI의 행마다 상태가 다를 수 있다.", document)
-        self.assertIn("- EDI 목록: EDI 목록은 혼합 상태를 표시하고", document)
-        self.assertIn("| EDI 목록에 보이는 상태 (ListStatus) | Input (입력), Submission (제출), Monitoring (모니터링), Settlement (정산) |", document)
+        self.assertIn("## 파생 상태", document)
+        self.assertIn(
+            "- EDI 상태는 EDI에 속한 EDI 행들의 행 상태가 모두 같으면 그 값이고, 서로 다르면 '혼합'이다.",
+            document,
+        )
+        self.assertIn("  - 근거: EDI의 행마다 상태가 다를 수 있다.", document)
+        self.assertIn("## 화면", document)
+        self.assertIn("- EDI 목록은 EDI 상태, 목록 상태 구분을 보여 준다.", document)
+        self.assertIn("- EDI 상세는 EDI 행의 행 상태를 보여 준다.", document)
+        self.assertNotIn("- 혼합 상태:", document)
+        self.assertIn("| 목록 상태 구분 (ListStatus) | Input (입력), Submission (제출), Monitoring (모니터링), Settlement (정산) |", document)
 
     def test_unverified_assumption_is_listed(self):
         document = self.render_example("edi_row_rules.pdl")

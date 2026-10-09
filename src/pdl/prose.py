@@ -25,6 +25,12 @@ class Names:
         for term in module.terms:
             if term.label:
                 self.labels[term.name] = term.label
+        for derivation in module.derivations:
+            if derivation.label:
+                self.labels[derivation.name] = derivation.label
+        for screen in module.screens:
+            if screen.label:
+                self.labels[screen.name] = screen.label
         self.value_labels = {
             (enum.name, value): label
             for enum in module.enums

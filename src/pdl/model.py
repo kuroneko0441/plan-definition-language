@@ -41,6 +41,28 @@ class TermDefinition:
 
 
 @dataclass
+class Derivation:
+    line: int
+    name: str
+    entity: str
+    source: str
+    mixed: str
+    label: str = ""
+    mixed_label: str = ""
+    why: str = ""
+
+
+@dataclass
+class Screen:
+    line: int
+    name: str
+    entity: str
+    shows: list[str]
+    label: str = ""
+    why: str = ""
+
+
+@dataclass
 class Declaration:
     line: int
     kind: str
@@ -153,6 +175,8 @@ class Module:
     terms: list[TermDefinition] = field(default_factory=list)
     enums: list[EnumDefinition] = field(default_factory=list)
     entities: list[EntityDefinition] = field(default_factory=list)
+    derivations: list[Derivation] = field(default_factory=list)
+    screens: list[Screen] = field(default_factory=list)
     declarations: list[Declaration] = field(default_factory=list)
     rules: list[Rule] = field(default_factory=list)
     exclusions: list[Exclusion] = field(default_factory=list)

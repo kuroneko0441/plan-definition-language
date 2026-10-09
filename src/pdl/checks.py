@@ -113,6 +113,7 @@ def check(module: Module) -> list[Finding]:
     for step in (
         check_definitions,
         check_entities,
+        check_views,
         check_actions,
         check_rules,
         check_permissions,
@@ -161,6 +162,51 @@ def check_entities(module: Module, index: Index) -> list[Finding]:
                         entity.line,
                     )
                 )
+    return findings
+
+
+def row_entities(module: Module, entity: str, source: str) -> list[str]:
+    return [
+        candidate.name
+        for candidate in module.entities
+        if any(type_name == entity for _, type_name in candidate.fields)
+        and any(type_name == source for _, type_name in candidate.fields)
+    ]
+
+
+def check_views(module: Module, index: Index) -> list[Finding]:
+    findings = []
+    derived = {derivation.name for derivation in module.derivations}
+    for derivation in module.derivations:
+        enum = index.enums.get(derivation.source)
+        if derivation.entity not in index.entities:
+            findings.append(Finding("UNDEFINED", f"entity {derivation.entity} of {derivation.name} is not defined", derivation.line))
+        if enum is None:
+            findings.append(Finding("UNDEFINED", f"enum {derivation.source} of {derivation.name} is not defined", derivation.line))
+            continue
+        if derivation.mixed in enum.values:
+            findings.append(
+                Finding("DUPLICATE", f"mixed value {derivation.mixed} is already a value of {derivation.source}", derivation.line)
+            )
+        if derivation.entity in index.entities and not row_entities(module, derivation.entity, derivation.source):
+            findings.append(
+                Finding(
+                    "UNDEFINED",
+                    f"no entity links {derivation.entity} to {derivation.source}, so {derivation.name} has no rows to derive from",
+                    derivation.line,
+                )
+            )
+    for screen in module.screens:
+        if screen.entity not in index.entities:
+            findings.append(Finding("UNDEFINED", f"entity {screen.entity} of screen {screen.name} is not defined", screen.line))
+        for item in screen.shows:
+            if "." in item:
+                entity_name, attribute = item.split(".", 1)
+                entity = index.entities.get(entity_name)
+                if entity is None or attribute not in dict(entity.fields):
+                    findings.append(Finding("UNDEFINED", f"{item} shown by screen {screen.name} is not a field", screen.line))
+            elif item not in index.enums and item not in derived:
+                findings.append(Finding("UNDEFINED", f"{item} shown by screen {screen.name} is not defined", screen.line))
     return findings
 
 

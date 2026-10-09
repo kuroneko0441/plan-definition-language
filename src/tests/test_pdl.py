@@ -443,12 +443,15 @@ class RenderTest(unittest.TestCase):
 
     def test_assumptions_are_marked_on_the_lines_that_depend_on_them(self):
         document = self.render_example("edi_row_rules.pdl")
-        self.assertEqual(document.count("(가정: 행을 수정하는 주체)"), 3)
+        self.assertEqual(document.count("(가정: 수정 작업을 하는 주체)"), 3)
+        self.assertIn("(가정: 수정 작업을 하는 주체, 제약사 마감 후 두 대응이 서로 배타적인지)", document)
+        self.assertIn("(가정: 제약사의 입금이 늦어진 경우의 정산월)", document)
+        self.assertIn("(가정: 목록 상태 구분과 행 상태의 관계)", document)
         self.assertIn(
             "- EDI팀은 제약사 마감 기록을 등록할 수 있다. (가정: 제약사 마감을 기록하는 주체)",
             document,
         )
-        self.assertIn("| 제약사의 입금이 늦어진 경우의 정산월 | 입금이 늦어져도", document)
+        self.assertIn("| 제약사의 입금이 늦어진 경우의 정산월 | 원문에서 아직 정해지지 않은 항목이며", document)
 
     def test_scope_lines_139_to_142_are_kept(self):
         document = self.render_example("edi_row_rules.pdl")

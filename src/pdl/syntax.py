@@ -307,8 +307,9 @@ class Parser:
             while self.accept("and"):
                 conditions.append(self.condition())
         requires = self.word() if self.accept("requires") else ""
+        assumes = self.word() if self.accept("assuming") else ""
         module.rules.append(
-            Rule(token.line, token.value, actor, action, resource, conditions, requires, self.why())
+            Rule(token.line, token.value, actor, action, resource, conditions, requires, self.why(), assumes)
         )
 
     def exclusive(self, module: Module) -> None:
@@ -406,8 +407,9 @@ class Parser:
                 self.expect("on")
                 event = self.word()
                 actor = self.word() if self.accept("by") else ""
+                assumes = self.word() if self.accept("assuming") else ""
                 machine.transitions.append(
-                    Transition(token.line, source, target, event, actor, self.why())
+                    Transition(token.line, source, target, event, actor, self.why(), assumes)
                 )
         module.machines.append(machine)
         module.definitions.append(("machine", machine.name, line))

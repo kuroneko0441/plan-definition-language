@@ -83,6 +83,7 @@ class Rule:
     conditions: list[Condition]
     requires: str = ""
     why: str = ""
+    assumes: str = ""
 
 
 @dataclass
@@ -100,6 +101,7 @@ class Transition:
     event: str
     actor: str = ""
     why: str = ""
+    assumes: str = ""
 
 
 @dataclass

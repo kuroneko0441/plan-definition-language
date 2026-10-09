@@ -285,19 +285,38 @@ class RenderTest(unittest.TestCase):
     def test_permission_matrix_and_rationale_are_rendered(self):
         document = self.render_example("edi_row_rules.pdl")
         self.assertIn("## 권한 규칙", document)
-        self.assertIn("| 딜러 | - | - | - | - | 조건부 |", document)
-        self.assertIn("| EDI팀 | 조건부 | 허용 | 허용 | 허용 | - |", document)
+        self.assertIn("| 딜러 | - | - | - | - | - | - | 조건부 |", document)
+        self.assertIn("| EDI팀 | 조건부 | 조건부 | 허용 | 조건부 | 허용 | 허용 | - |", document)
         self.assertIn("정산된 행은 수정할 수 없다.", document)
-        self.assertIn("권한 규칙을 두지 않은 엔티티: 제약사, 수정 사유, 수정 이력", document)
         self.assertIn("# EDI 업로드, 제출, 행 수정 규칙", document)
-        self.assertIn("- EDI팀은 업로드 마감을 설정하거나 해제할 수 있다.", document)
+        self.assertIn("- EDI팀은 업로드 마감을 설정·해제할 수 있다.", document)
+        self.assertLess(document.index("## 권한 규칙"), document.index("## 부록"))
+        self.assertLess(document.index("### 권한 요약"), len(document))
+
+    def test_assumptions_are_marked_on_the_lines_that_depend_on_them(self):
+        document = self.render_example("edi_row_rules.pdl")
+        self.assertEqual(document.count("(가정: 행을 수정하는 주체)"), 3)
+        self.assertIn(
+            "- EDI팀은 제약사 마감 기록을 등록할 수 있다. (가정: 제약사 마감을 기록하는 주체)",
+            document,
+        )
+        self.assertIn("| 제약사의 입금이 늦어진 경우의 정산월 | 입금이 늦어져도", document)
+
+    def test_scope_lines_139_to_142_are_kept(self):
+        document = self.render_example("edi_row_rules.pdl")
+        self.assertIn("- 제출 양식의 정산월 칸: 일부 프로그램 제출 양식의 정산월 칸은 이음의 제출월에 해당하며", document)
+        self.assertIn("특정 시점에 실제로 제출된 값을 확인할 수 있어야 한다.", document)
+
+    def test_assumption_must_name_a_declared_unknown(self):
+        text = "module m\nactor X\naction Do\nentity R\npermit X Do R assuming nothing"
+        self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 1}))
 
     def test_terms_and_field_notes_are_rendered(self):
         document = self.render_example("edi_row_rules.pdl")
         self.assertIn("- 처방월: 처방이 발생한 달이다.", document)
         self.assertIn("- 업로드: 딜러가 이음에 EDI를 올리는 행위다.", document)
         self.assertIn("- 제약사 마감: 제약사 전산이 더 이상 제출과 수정을 받지 않는 시점이며", document)
-        self.assertIn("settlement_month: Month - 제약사가 정산하는 달이다.", document)
+        self.assertIn("pharma: PharmaCompany - 마감을 설정하는 제약사다.", document)
 
     def test_rules_become_korean_sentences_with_the_right_particles(self):
         document = self.render_example("edi_row_rules.pdl")
@@ -322,11 +341,17 @@ class RenderTest(unittest.TestCase):
         document = self.render_example("edi_row_rules.pdl")
         self.assertIn("## 상태 머신: 월별 EDI 업무", document)
         self.assertIn(
-            "- '업로드 시작 전' 상태에서 '매달 업로드 시작' 사건이 일어나면 '업로드와 입력 진행' 상태가 된다. (주체: 매달 정해진 시점)",
+            "- '업로드 시작 전' 상태에서 '매달 업로드 시작'이 일어나면 '업로드와 입력 진행' 상태가 된다. "
+            "(주체: 매달 정해진 시점) (가정: 매달 업로드를 시작하는 주체)",
             document,
         )
         self.assertIn(
-            "- 위에 적은 경우 외의 상태에서 사건 (거부한다): '매달 업로드 시작', '업로드 마감 설정', '업로드 마감 해제', '제약사에 제출'",
+            "- '제약사에 제출됨' 상태에서 '마감 전 재제출'이 일어나면 '제약사에 제출됨' 상태가 된다. (주체: EDI팀)",
+            document,
+        )
+        self.assertIn(
+            "- 위에 적은 경우 외의 상태에서 사건 (거부한다): '매달 업로드 시작', '업로드 마감 설정', "
+            "'업로드 마감 해제', '제약사에 제출', '마감 전 재제출', '제약사 마감'",
             document,
         )
         self.assertIn("  - 근거: 매달 EDI 업로드가 시작되면 EDI팀은 입력을 시작한다.", document)
@@ -348,7 +373,7 @@ class RenderTest(unittest.TestCase):
 
     def test_unverified_assumption_is_listed(self):
         document = self.render_example("edi_row_rules.pdl")
-        self.assertIn("## 미검증 임시 결정", document)
+        self.assertIn("## 확인이 필요한 가정", document)
         self.assertIn("| 업로드 마감 전 제약사 제출 | 업로드 마감 전에는 제약사에 제출하지 않는다 | ERP-PLANNING.md:235 |", document)
         self.assertIn("| 제약사 마감을 기록하는 주체 | EDI팀 | ERP-PLANNING.md:237 |", document)
 

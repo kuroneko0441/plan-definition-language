@@ -65,6 +65,7 @@ class Index:
         actions = [d for d in module.declarations if d.kind == "action"]
         self.action_actors = {d.name: set(d.performed_by) for d in actions if d.performed_by}
         self.action_resources = {d.name: set(d.applies_to) for d in actions if d.applies_to}
+        self.unknown_ids = {unknown.identifier for unknown in module.unknowns}
         formulas = [invariant.formula for invariant in module.invariants]
         for exclusion in module.exclusions:
             both = [
@@ -394,6 +395,8 @@ def check_rules(module: Module, index: Index) -> list[Finding]:
                 findings.append(Finding("UNDEFINED", f"{kind} {value} is not defined", rule.line))
         for condition in rule.conditions:
             findings.extend(check_condition(condition, index, rule.line))
+        if rule.assumes and rule.assumes not in index.unknown_ids:
+            findings.append(Finding("UNDEFINED", f"assumption {rule.assumes} is not declared as unknown", rule.line))
         if rule.requires and rule.requires not in index.entities and rule.requires not in index.enums:
             findings.append(
                 Finding("UNDEFINED", f"required item {rule.requires} is not defined", rule.line)
@@ -488,6 +491,8 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
         if transition.event not in events:
             findings.append(Finding("UNDEFINED", f"event {transition.event} in {label} is not an event", transition.line))
             valid = False
+        if transition.assumes and transition.assumes not in index.unknown_ids:
+            findings.append(Finding("UNDEFINED", f"assumption {transition.assumes} of {label} is not declared as unknown", transition.line))
         if not transition.actor:
             findings.append(Finding("OWNERLESS", f"{label} has no actor", transition.line))
         elif transition.actor not in index.actors:

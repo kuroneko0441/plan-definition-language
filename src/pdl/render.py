@@ -390,14 +390,21 @@ def render_machines(
         otherwise_assumes: dict[str, list[str]] = {}
         for handling in machine.handlings:
             event = event_text(machine, handling.event)
-            if handling.state == "*":
+            if handling.state == "*" and not handling.conditions:
                 otherwise.setdefault(handling.kind, []).append(f"'{event}'")
                 known = otherwise_assumes.setdefault(handling.kind, [])
                 known.extend(name for name in handling.assumes if name not in known)
             else:
-                state = state_text(machine, handling.state)
+                state = "*" if handling.state == "*" else state_text(machine, handling.state)
                 note = assumption_text(handling.assumes, module, labels)
-                lines.append(f"- '{state}' + '{event}': {labels[handling.kind]}{note}")
+                guard = ""
+                if handling.conditions:
+                    guard = (
+                        f" ({korean_condition(handling.conditions, names)})"
+                        if language == "ko"
+                        else f" (when {english_condition(handling.conditions, names)})"
+                    )
+                lines.append(f"- '{state}' + '{event}': {labels[handling.kind]}{guard}{note}")
                 if handling.why:
                     lines.append(f"  - {labels['why']}: {handling.why}")
         for kind, events in otherwise.items():

@@ -124,6 +124,7 @@ class Handling:
     event: str
     why: str = ""
     assumes: list[str] = field(default_factory=list)
+    conditions: list[Condition] = field(default_factory=list)
 
 
 @dataclass

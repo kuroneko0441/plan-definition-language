@@ -487,6 +487,41 @@ class CapabilityTest(unittest.TestCase):
         self.assertEqual(counts["TRAP"], 1)
 
 
+GUARDED_IGNORE = (
+    "module m\nexternal Ext\nenum S = On | Off\n"
+    "machine M { states A, B\ninitial A\nterminal B\nevent E, F\n"
+    "A -> B on E when S = On by Ext\nignore A on E when S = Off\n"
+    "A -> B on F by Ext\nignore B on E\nignore B on F }\n"
+    "scenario skipped on M { start A given S = Off events E, F expect B }\n"
+)
+
+
+class GuardedHandlingTest(unittest.TestCase):
+    def test_a_guarded_ignore_covers_the_other_world(self):
+        self.assertEqual(blocking_kinds(GUARDED_IGNORE), Counter())
+
+    def test_a_world_without_transition_or_handling_is_uncovered(self):
+        text = GUARDED_IGNORE.replace("enum S = On | Off", "enum S = On | Off | Hold")
+        self.assertEqual(blocking_kinds(text), Counter({"UNCOVERED": 1}))
+
+    def test_a_guarded_ignore_that_overlaps_a_transition_is_a_contradiction(self):
+        text = GUARDED_IGNORE.replace("ignore A on E when S = Off", "ignore A on E when S in {On, Off}")
+        self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
+
+    def test_a_guarded_ignore_beside_an_unconditional_transition_is_a_contradiction(self):
+        text = GUARDED_IGNORE.replace("A -> B on E when S = On by Ext", "A -> B on E by Ext")
+        self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
+
+    def test_a_scenario_skips_an_event_only_in_the_guarded_world(self):
+        text = GUARDED_IGNORE.replace("enum S = On | Off", "enum S = On | Off | Hold").replace("given S = Off", "given S = Hold")
+        self.assertEqual(blocking_kinds(text), Counter({"UNCOVERED": 1, "SCENARIO_FAILED": 1}))
+
+    def test_the_guard_is_rendered_beside_the_handling(self):
+        module = parse_module(GUARDED_IGNORE)
+        self.assertIn("'A' + 'E': ignored (when S is Off)", render(module, check(module), "en"))
+        self.assertIn("'A' + 'E': 무시한다 (S가 'Off'일 때)", render(module, check(module), "ko"))
+
+
 class ExampleTest(unittest.TestCase):
     def test_negative_control_has_no_blocking_finding(self):
         self.assertEqual(example_kinds("edi_row_rules.pdl"), Counter())

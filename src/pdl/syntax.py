@@ -458,9 +458,10 @@ class Parser:
                 state = self.name_or_star()
                 self.expect("on")
                 event = self.word()
+                conditions = self.conditions_after("when")
                 assumes = self.assumptions()
                 machine.handlings.append(
-                    Handling(token.line, token.value, state, event, self.why(), assumes)
+                    Handling(token.line, token.value, state, event, self.why(), assumes, conditions)
                 )
             else:
                 source = self.word()

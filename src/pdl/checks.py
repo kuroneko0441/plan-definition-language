@@ -12,6 +12,7 @@ from .model import (
     EnumDefinition,
     ForAll,
     Formula,
+    Handling,
     Implies,
     InSet,
     Machine,
@@ -511,45 +512,54 @@ def check_guards(
     grouped: dict[tuple[str, str], list[Transition]],
     else_covered: set[tuple[str, str]],
     index: Index,
+    guarded_handlings: dict[tuple[str, str], list[Handling]] | None = None,
 ) -> list[Finding]:
     findings = []
-    for (state, event), group in grouped.items():
-        if len(group) == 1 and not group[0].conditions:
+    guarded_handlings = guarded_handlings or {}
+    for (state, event) in [*grouped, *(key for key in guarded_handlings if key not in grouped)]:
+        group = grouped.get((state, event), [])
+        held = guarded_handlings.get((state, event), [])
+        if len(group) == 1 and not group[0].conditions and not held:
             continue
         label = f"{state} on {event}"
+        line = (group or held)[0].line
+        if held and any(not transition.conditions for transition in group):
+            findings.append(Finding("CONTRADICTION", f"{label} is both an unconditional transition and a guarded {held[0].kind}", line))
+            continue
         if len(group) > 1 and any(not transition.conditions for transition in group):
             destinations = {transition.target for transition in group}
             if len(destinations) > 1:
                 findings.append(
-                    Finding("CONTRADICTION", f"{label} leads to {', '.join(sorted(destinations))}", group[0].line)
+                    Finding("CONTRADICTION", f"{label} leads to {', '.join(sorted(destinations))}", line)
                 )
             continue
         variables = {
             condition.variable
-            for transition in group
-            for condition in transition.conditions
+            for item in (*group, *held)
+            for condition in item.conditions
             if condition.variable in index.enums
         }
         assignments = worlds(index, variables)
         if assignments is None:
-            findings.append(Finding("TOO_LARGE", f"{label} has too many guard combinations to enumerate", group[0].line))
+            findings.append(Finding("TOO_LARGE", f"{label} has too many guard combinations to enumerate", line))
             continue
         conflicts = []
         gaps = []
         for assignment in assignments:
             applicable = [t for t in group if all(condition_holds(c, assignment) for c in t.conditions)]
-            if len({t.target for t in applicable}) > 1:
+            applicable_held = [h for h in held if all(condition_holds(c, assignment) for c in h.conditions)]
+            if len({t.target for t in applicable}) > 1 or (applicable and applicable_held):
                 conflicts.append(assignment)
-            elif not applicable and (state, event) not in else_covered:
+            elif not applicable and not applicable_held and (state, event) not in else_covered:
                 gaps.append(assignment)
         if conflicts:
             findings.append(
-                Finding("CONTRADICTION", f"{label} leads to different states when {describe(conflicts[0])} ({len(conflicts)} combinations)", group[0].line)
+                Finding("CONTRADICTION", f"{label} has conflicting outcomes when {describe(conflicts[0])} ({len(conflicts)} combinations)", line)
             )
         if gaps:
             listed = "; ".join(describe(a) for a in gaps[:SAMPLE_LIMIT])
             findings.append(
-                Finding("UNCOVERED", f"{label} has no outcome when {listed} ({len(gaps)} combinations)", group[0].line)
+                Finding("UNCOVERED", f"{label} has no outcome when {listed} ({len(gaps)} combinations)", line)
             )
     return findings
 
@@ -605,11 +615,14 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
             grouped.setdefault((transition.source, transition.event), []).append(transition)
     handled = set(targets)
     else_covered: set[tuple[str, str]] = set()
+    guarded_handlings: dict[tuple[str, str], list[Handling]] = {}
     for handling in machine.handlings:
         for kind, value, known in (("state", handling.state, states), ("event", handling.event, events)):
             if value != "*" and value not in known:
                 findings.append(Finding("UNDEFINED", f"{kind} {value} in {handling.kind} is not defined", handling.line))
         findings.extend(check_assumptions(handling.assumes, index, handling.line, handling.kind))
+        for condition in handling.conditions:
+            findings.extend(check_condition(condition, index, handling.line))
         pairs = (
             [(state, handling.event) for state in states]
             if handling.state == "*"
@@ -617,15 +630,21 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
         )
         for pair in pairs:
             group = grouped.get(pair)
-            if group is None:
+            if handling.conditions:
+                unguarded = group is not None and any(not transition.conditions for transition in group)
+                if not (handling.state == "*" and unguarded):
+                    guarded_handlings.setdefault(pair, []).append(handling)
+            elif group is None:
                 handled.add(pair)
+                else_covered.add(pair)
             elif all(transition.conditions for transition in group):
                 else_covered.add(pair)
             elif handling.state != "*":
                 findings.append(
                     Finding("CONTRADICTION", f"{pair[0]} on {pair[1]} is both a transition and {handling.kind}", handling.line)
                 )
-    findings.extend(check_guards(machine, grouped, else_covered, index))
+    findings.extend(check_guards(machine, grouped, else_covered, index, guarded_handlings))
+    handled |= set(guarded_handlings)
     if machine.initial in states:
         reachable = reachable_from(machine.initial, forward)
         for state in machine.states:
@@ -795,8 +814,6 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
             continue
         given = {c.variable: c.value for c in scenario.given if c.operator == "="}
         counters = {counter: 0 for counter in machine.counters}
-        ignored = {(h.state, h.event) for h in machine.handlings if h.kind == "ignore" and h.state != "*"}
-        ignored_events = {h.event for h in machine.handlings if h.kind == "ignore" and h.state == "*"}
         state = scenario.start
         failed = False
         for event in scenario.events:
@@ -811,7 +828,13 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
                 for counter, operator, amount in applicable[0].effects:
                     if counter in counters:
                         counters[counter] = amount if operator == "=" else counters[counter] + amount
-            elif (state, event) in ignored or event in ignored_events:
+            elif any(
+                h.kind == "ignore"
+                and h.event == event
+                and h.state in (state, "*")
+                and all(condition_holds(c, world) for c in h.conditions)
+                for h in machine.handlings
+            ):
                 continue
             else:
                 findings.append(

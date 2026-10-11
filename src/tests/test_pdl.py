@@ -3,6 +3,8 @@ from collections import Counter
 from pathlib import Path
 
 from pdl.checks import check
+from pdl.cli import check_consistency
+from pdl.project import compare
 from pdl.render import render
 from pdl.syntax import PdlSyntaxError, parse_module
 
@@ -549,6 +551,57 @@ class JointScenarioTest(unittest.TestCase):
         document = render(module, check(module), "en")
         self.assertIn("- Start: P = Ok, T = Open", document)
         self.assertIn("- Event sequence: P: Fail", document)
+
+
+class ConsistencyTest(unittest.TestCase):
+    def kinds(self, *texts: str) -> Counter:
+        modules = [(Path(f"m{number}.pdl"), parse_module(text)) for number, text in enumerate(texts)]
+        return Counter((f.kind, f.blocking) for f in compare(modules))
+
+    def test_modules_that_agree_or_list_other_slices_pass(self):
+        first = "module a\nentity Doc key (id) {\nid: Text\ntitle: Text\n}\nenum S = On | Off\n"
+        second = "module b\nentity Doc key (id) {\nid: Text\nauthor: Text\n}\nenum S = Off | On\n"
+        self.assertEqual(self.kinds(first, second), Counter())
+
+    def test_enum_values_that_differ_are_a_conflict(self):
+        self.assertEqual(
+            self.kinds("module a\nenum S = On | Off\n", "module b\nenum S = On | Off | Hold\n"),
+            Counter({("INCONSISTENT", True): 1}),
+        )
+
+    def test_a_field_type_or_key_that_differs_is_a_conflict(self):
+        base = "module a\nentity Doc key (id) {\nid: Text\ntitle: Text\n}\n"
+        other_type = "module b\nentity Doc key (id) {\nid: Text\ntitle: Day\n}\n"
+        other_key = "module b\nentity Doc key (title) {\nid: Text\ntitle: Text\n}\n"
+        self.assertEqual(self.kinds(base, other_type), Counter({("INCONSISTENT", True): 1}))
+        self.assertEqual(self.kinds(base, other_key), Counter({("INCONSISTENT", True): 1}))
+
+    def test_one_name_in_two_categories_is_a_conflict_unless_one_is_a_term(self):
+        entity = "module a\nentity Doc key (id) {\nid: Text\n}\n"
+        self.assertEqual(self.kinds(entity, "module b\nenum Doc = On | Off\n"), Counter({("INCONSISTENT", True): 1}))
+        self.assertEqual(self.kinds(entity, "module b\nterm Doc\n"), Counter())
+        self.assertEqual(self.kinds("module b\nterm Doc\n", entity), Counter())
+
+    def test_a_label_that_differs_is_only_a_note(self):
+        self.assertEqual(
+            self.kinds('module a\nenum S label "상태" = On | Off\n', 'module b\nenum S label "현황" = On | Off\n'),
+            Counter({("LABEL_DIFFERS", False): 1}),
+        )
+
+    def test_the_command_reads_a_directory(self):
+        import tempfile
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.pdl").write_text("module a\nenum S = On | Off\n", encoding="utf-8")
+            (root / "b.pdl").write_text("module b\nenum S = On\n", encoding="utf-8")
+            with redirect_stdout(StringIO()) as output:
+                clean = check_consistency([root])
+            self.assertFalse(clean)
+            self.assertIn("INCONSISTENT", output.getvalue())
+            self.assertIn("2 modules compared, 1 inconsistencies", output.getvalue())
 
 
 class ExampleTest(unittest.TestCase):

@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from .checks import check
+from .project import compare
 from .render import render
 from .syntax import PdlSyntaxError, parse_module
 
@@ -30,13 +31,39 @@ def build_file(path: Path, output_directory: Path, language: str, draft: bool = 
     return not failed
 
 
+def expand(paths: list[Path]) -> list[Path]:
+    files: list[Path] = []
+    for path in paths:
+        files.extend(sorted(path.glob("*.pdl")) if path.is_dir() else [path])
+    return files
+
+
+def check_consistency(paths: list[Path]) -> bool:
+    modules = []
+    clean = True
+    for path in expand(paths):
+        try:
+            modules.append((path, parse_module(path.read_text(encoding="utf-8"), path)))
+        except PdlSyntaxError as error:
+            print(f"{path}: SYNTAX {error}")
+            clean = False
+    findings = compare(modules)
+    for finding in findings:
+        label = "HOLE" if finding.blocking else "NOTE"
+        print(f"{finding.path}:{finding.line}: {label} {finding.kind} {finding.message}")
+    print(f"{len(modules)} modules compared, {sum(1 for f in findings if f.blocking)} inconsistencies")
+    return clean and not any(finding.blocking for finding in findings)
+
+
 def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pdl")
-    parser.add_argument("command", choices=["build"])
+    parser.add_argument("command", choices=["build", "consistency"])
     parser.add_argument("paths", nargs="+", type=Path)
     parser.add_argument("--output", type=Path, default=Path("build"))
     parser.add_argument("--language", choices=["ko", "en"], default="ko")
     parser.add_argument("--draft", action="store_true")
     options = parser.parse_args(arguments)
+    if options.command == "consistency":
+        return 0 if check_consistency(options.paths) else 1
     results = [build_file(path, options.output, options.language, options.draft) for path in options.paths]
     return 0 if all(results) else 1

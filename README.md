@@ -3,15 +3,21 @@
 The plan definition language (PDL) describes a plan as sets, rules, and state machines.
 The compiler reports the holes in a module, such as a state with no way out or a case that no rule covers, and writes a Markdown document from a module that has none.
 
-## Usage
-
-The compiler runs with Python 3 from the `src` directory:
+## Installation
 
 ```sh
-python3 -m pdl build door.pdl                  # writes build/door.md
-python3 -m pdl build door.pdl --draft          # writes a draft when the module has holes
-python3 -m pdl build door.pdl --language en --output out
-python3 -m pdl consistency plans/              # compares the modules of one plan
+uv tool install git+ssh://git@github.com/kuroneko0441/plan-definition-language
+```
+
+Append `@v0.1.0` to the URL to install a release.
+
+## Usage
+
+```sh
+pdl build door.pdl                  # writes build/door.md
+pdl build door.pdl --draft          # writes a draft when the module has holes
+pdl build door.pdl --language en --output out
+pdl consistency plans/              # compares the modules of one plan
 ```
 
 `build` exits with a nonzero status when a module has a hole.
@@ -36,7 +42,9 @@ machine Door label "문" {
 }
 ```
 
-## Tests
+## Development
+
+In a clone, `python3 -m pdl` runs the compiler from the `src` directory, and the tests run from there too:
 
 ```sh
 cd src

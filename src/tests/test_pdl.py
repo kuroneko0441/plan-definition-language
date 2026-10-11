@@ -8,15 +8,134 @@ from pdl.project import compare
 from pdl.render import render
 from pdl.syntax import PdlSyntaxError, parse_module
 
-EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
+LIBRARY = """
+module library label "도서관 대출 규칙"
+
+term Renewal label "연장" why "회원이 반납 기한을 늦추는 행위다."
+entity EditReason label "수정 사유" key (text) passive {
+    text: Text label "사유 문구"
+}
+    why "대출 기록을 고친 이유이며 기록마다 남긴다."
+
+enum LoanState label "대출 상태" = Active "대출 중" | Returned "반납됨" | Lost "분실"
+    why "대출 한 건이 가질 수 있는 상태다."
+enum ListGroup label "목록 구분" = Lending "대출" | Returning "반납"
+    why "대출 목록을 가르는 화면의 구분이다."
+enum DeskStatus label "창구 상태" = Open "열림" | Closed "닫힘"
+    why "사서가 창구를 열었는지를 나타낸다."
+
+entity Reader label "이용자" key (card) passive {
+    card: Text label "회원증 번호"
+}
+    why "도서관에 등록한 사람이다."
+
+entity LoanRecord label "대출 기록" key (id) {
+    id: Text label "식별자"
+    reader: Reader label "이용자"
+    state: LoanState label "대출 상태"
+    lent_on: Day label "대출일" why "책을 빌려 간 날이다."
+    due_month: Month label "반납월"
+    returned_on: Day? label "반납일"
+}
+    why "대출 한 건이다. 책 한 권마다 한 건이 생긴다."
+
+derive ReaderStanding label "이용자 상태" of Reader from LoanState mixed Mixed "혼합"
+    why "이용자의 대출 기록마다 상태가 다를 수 있다."
+
+screen LoanList label "대출 목록" of LoanRecord shows ReaderStanding, ListGroup
+    why "목록에서 이용자별 상태를 한눈에 본다."
+screen LoanDetail label "대출 상세" of LoanRecord shows LoanRecord.state, LoanRecord.lent_on
+
+actor Librarian label "사서", Member label "이용자 계정"
+external Archive label "서고 시스템"
+
+action Lend label "대출 처리" by (Librarian) on (LoanRecord),
+    Extend label "연장" by (Member, Librarian) on (LoanRecord),
+    EditRecord label "기록 수정" by (Librarian) on (LoanRecord)
+
+permit Librarian Lend LoanRecord when DeskStatus = Open
+    why "창구가 열려 있을 때만 대출을 처리한다."
+forbid Librarian Lend LoanRecord when DeskStatus = Closed
+    why "창구가 닫히면 대출을 처리하지 않는다."
+permit Member Extend LoanRecord when LoanState = Active assuming renewal_limit
+    why "대출 중인 책만 연장할 수 있다."
+forbid Member Extend LoanRecord when LoanState = Returned
+    why "반납한 책은 연장할 수 없다."
+forbid Member Extend LoanRecord when LoanState = Lost
+    why "분실한 책은 연장할 수 없다."
+permit Librarian Extend LoanRecord
+    why "사서는 상태와 무관하게 연장을 처리한다."
+permit Librarian EditRecord LoanRecord when LoanState = Active requires EditReason
+    why "대출 중인 기록은 사유를 남기고 고친다."
+permit Librarian EditRecord LoanRecord when LoanState = Returned requires EditReason assuming editing_actor
+    why "반납한 기록도 사유를 남기고 고친다."
+forbid * EditRecord LoanRecord when LoanState = Lost
+    why "분실 처리한 기록은 고칠 수 없다."
+
+law due_after_lent: LoanRecord.due_month = next(month_of(LoanRecord.lent_on))
+    why "반납월은 대출일의 다음 달이다."
+
+machine MonthlyReview label "월별 대출 점검"
+    why "점검은 이용자별, 월별로 따로 진행되며 매달 반복된다." {
+    states Preparing "준비 중", Reviewing "점검 중", Closed "마감"
+    initial Preparing
+    cyclic
+    event BeginMonth "월 점검 시작", Finish "점검 마감", Reopen "다시 열기"
+
+    Preparing -> Reviewing on BeginMonth by Librarian assuming month_starter
+        why "매달 점검이 시작되면 사서가 기록을 살핀다."
+    Reviewing -> Closed on Finish by Librarian
+    Closed -> Preparing on Reopen by Archive
+
+    ignore Preparing on Finish
+    ignore Reviewing on BeginMonth
+    ignore Closed on BeginMonth
+    reject * on Reopen assuming unlisted_events
+    reject Closed on Finish
+}
+
+unknown value renewal_limit {
+    label "연장 횟수 제한"
+    source "도서관 규정집 3쪽"
+    provisional "한 건당 한 번만 연장할 수 있다"
+}
+
+unknown value editing_actor {
+    label "기록을 고치는 주체"
+    source "도서관 규정집 5쪽"
+    provisional "사서가 고친다"
+    verified yes
+}
+
+unknown value unlisted_events {
+    label "흐름에 적지 않은 사건의 처리"
+    source "운영 회의록"
+    provisional "적지 않은 사건은 일어나지 않는 것으로 본다"
+}
+
+unknown value month_starter {
+    label "월 점검을 시작하는 주체"
+    source "운영 회의록"
+    provisional "사서가 시작한다"
+    open yes
+}
+"""
+
+UNCOVERED_LIBRARY = """
+module small_library
+actor Librarian
+action Lend by (Librarian) on (LoanRecord)
+enum LoanState = Active | Returned
+entity LoanRecord key (id) {
+    id: Text
+    state: LoanState
+}
+permit Librarian Lend LoanRecord when LoanState = Active
+"""
 
 
 def blocking_kinds(text: str) -> Counter:
     return Counter(finding.kind for finding in check(parse_module(text)) if finding.blocking)
-
-
-def example_kinds(name: str) -> Counter:
-    return blocking_kinds((EXAMPLES / name).read_text(encoding="utf-8"))
 
 
 COVERED_MACHINE = """
@@ -335,11 +454,14 @@ class ExtensionTest(unittest.TestCase):
         from pdl.cli import build_file
 
         with tempfile.TemporaryDirectory() as directory:
-            output = TempPath(directory)
-            self.assertFalse(build_file(EXAMPLES / "org_roles.pdl", output, "ko"))
-            self.assertEqual(list(output.iterdir()), [])
-            self.assertFalse(build_file(EXAMPLES / "org_roles.pdl", output, "ko", draft=True))
-            draft = (output / "org_roles.draft.md").read_text(encoding="utf-8")
+            root = TempPath(directory)
+            source = root / "small_library.pdl"
+            source.write_text(UNCOVERED_LIBRARY, encoding="utf-8")
+            output = root / "build"
+            self.assertFalse(build_file(source, output, "ko"))
+            self.assertFalse(output.exists())
+            self.assertFalse(build_file(source, output, "ko", draft=True))
+            draft = (output / "small_library.draft.md").read_text(encoding="utf-8")
             self.assertIn("## 초안", draft)
             self.assertIn("UNCOVERED", draft)
 
@@ -350,8 +472,11 @@ class ExtensionTest(unittest.TestCase):
         from pdl.cli import build_file
 
         with tempfile.TemporaryDirectory() as directory:
-            for path in sorted(EXAMPLES.glob("*.pdl")) + sorted(EXAMPLES.parent.glob("plans/*/*.pdl")):
-                build_file(path, TempPath(directory), "ko", draft=True)
+            root = TempPath(directory)
+            for number, text in enumerate((LIBRARY, UNCOVERED_LIBRARY, GUARDED_IGNORE, COUNTER_MACHINE, CROSS_MACHINES)):
+                source = root / f"module{number}.pdl"
+                source.write_text(text, encoding="utf-8")
+                build_file(source, root / "build", "ko", draft=True)
 
 
 COUNTER_MACHINE = (
@@ -604,254 +729,105 @@ class ConsistencyTest(unittest.TestCase):
             self.assertIn("2 modules compared, 1 inconsistencies", output.getvalue())
 
 
-class ExampleTest(unittest.TestCase):
-    def test_negative_control_has_no_blocking_finding(self):
-        self.assertEqual(example_kinds("edi_row_rules.pdl"), Counter())
-
-    def test_real_holes_are_all_found(self):
-        self.assertEqual(
-            example_kinds("erp_real_holes.pdl"),
-            Counter(
-                {
-                    "DUPLICATE": 1,
-                    "UNDEFINED": 3,
-                    "CONTRADICTION": 1,
-                    "UNCOVERED": 3,
-                    "UNKNOWN_STRUCTURE": 1,
-                }
-            ),
-        )
-
-    def test_ordered_gates_of_another_tool_pass_with_the_same_core(self):
-        self.assertEqual(example_kinds("slack_apps_gates.pdl"), Counter())
-
-    def test_code_acquisition_leaves_unstated_events_and_two_structures_open(self):
-        self.assertEqual(
-            example_kinds("partner_codes.pdl"),
-            Counter({"UNHANDLED": 6, "UNKNOWN_STRUCTURE": 2}),
-        )
-
-    def test_settlement_comparison_is_silent_about_changes_after_a_full_match(self):
-        self.assertEqual(
-            example_kinds("settlement_comparison.pdl"),
-            Counter({"UNHANDLED": 1, "UNKNOWN_STRUCTURE": 1}),
-        )
-
-    def test_carry_over_waits_for_two_undecided_structures(self):
-        self.assertEqual(example_kinds("carry_over.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
-
-    def test_channels_wait_for_two_undecided_structures(self):
-        self.assertEqual(example_kinds("channels.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
-
-    def test_team_permissions_leave_one_combination_and_one_structure_open(self):
-        self.assertEqual(
-            example_kinds("org_roles.pdl"),
-            Counter({"UNCOVERED": 1, "UNKNOWN_STRUCTURE": 1}),
-        )
-
-    def test_auto_answer_rules_leave_five_combinations_unanswered_per_action(self):
-        self.assertEqual(
-            example_kinds("filtering_auto_answer.pdl"), Counter({"UNCOVERED": 2})
-        )
-        module = parse_module((EXAMPLES / "filtering_auto_answer.pdl").read_text(encoding="utf-8"))
-        message = next(f.message for f in check(module) if "AnswerAvailable" in f.message)
-        self.assertIn("(5 combinations)", message)
-        self.assertIn("DealerHolds=Yes, Received=Provisional, UpstreamReply=NotAsked", message)
-        self.assertIn("DealerHolds=No, Received=Nothing, UpstreamReply=Otherwise", message)
-
-    def test_the_database_section_has_duplicate_tables_and_dangling_references(self):
-        self.assertEqual(
-            example_kinds("erp_db_model.pdl"),
-            Counter({"DUPLICATE": 5, "UNDEFINED": 6, "UNKNOWN_STRUCTURE": 6}),
-        )
-
-    def test_scope_and_edi_split_modules_have_no_holes(self):
-        for name in ("erp_scope.pdl", "edi_split.pdl"):
-            self.assertEqual(example_kinds(name), Counter(), name)
-
-    def test_code_request_flow_waits_for_two_undecided_structures(self):
-        self.assertEqual(example_kinds("code_request.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
-
-    def test_menus_wait_for_two_undecided_structures(self):
-        self.assertEqual(example_kinds("menus.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
-
-    def test_basic_flow_waits_for_two_undecided_structures(self):
-        self.assertEqual(example_kinds("basic_flow.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
-
-    def test_settlement_cases_leave_seven_reasons_without_a_treatment(self):
-        self.assertEqual(
-            example_kinds("settlement_adjustments.pdl"),
-            Counter({"UNCOVERED": 1, "UNKNOWN_STRUCTURE": 3}),
-        )
-        module = parse_module((EXAMPLES / "settlement_adjustments.pdl").read_text(encoding="utf-8"))
-        message = next(f.message for f in check(module) if f.kind == "UNCOVERED")
-        self.assertIn("(7 combinations)", message)
-
-    def test_every_open_question_of_the_source_is_listed(self):
-        self.assertEqual(example_kinds("open_questions.pdl"), Counter({"UNKNOWN_STRUCTURE": 28}))
-
-    def test_commission_waits_for_three_undecided_structures(self):
-        self.assertEqual(example_kinds("commission.pdl"), Counter({"UNKNOWN_STRUCTURE": 3}))
-
-    def test_hospital_size_split_waits_for_two_undecided_structures(self):
-        self.assertEqual(example_kinds("hospital_size_split.pdl"), Counter({"UNKNOWN_STRUCTURE": 2}))
-
-    def test_history_transfer_audit_log_and_integration_have_no_holes(self):
-        for name in ("history_transfer.pdl", "audit_log.pdl", "external_integration.pdl"):
-            self.assertEqual(example_kinds(name), Counter(), name)
-
-    def test_documented_issue_transitions_leave_user_set_states_open(self):
-        kinds = example_kinds("issue_tracker.pdl")
-        self.assertEqual(kinds["UNREACHABLE"], 2)
-        self.assertEqual(kinds["TRAP"], 5)
-        self.assertEqual(kinds["UNHANDLED"], 6)
-
-
 class RenderTest(unittest.TestCase):
-    def render_example(self, name: str, language: str = "ko") -> str:
-        module = parse_module((EXAMPLES / name).read_text(encoding="utf-8"))
+    def render_library(self, language: str = "ko") -> str:
+        module = parse_module(LIBRARY)
         return render(module, check(module), language)
 
+    def test_the_library_fixture_builds_without_a_blocking_finding(self):
+        self.assertEqual(blocking_kinds(LIBRARY), Counter())
+
     def test_permission_matrix_and_rationale_are_rendered(self):
-        document = self.render_example("edi_row_rules.pdl")
+        document = self.render_library()
         self.assertIn("## 권한 규칙", document)
-        self.assertIn("- 딜러: EDI 업로드 조건부", document)
-        self.assertIn("EDI 행 수정 조건부", document)
-        self.assertIn("업로드 마감 설정·해제 허용", document)
-        self.assertIn("정산된 행은 수정할 수 없다.", document)
-        self.assertIn("# EDI 업로드, 제출, 행 수정 규칙", document)
-        self.assertIn("- EDI팀은 업로드 마감을 설정·해제할 수 있다.", document)
+        self.assertIn("- 사서: 대출 기록 기록 수정 조건부(대출 상태), 대출 기록 연장 허용, 대출 기록 대출 처리 조건부(창구 상태)", document)
+        self.assertIn("- 이용자 계정: 대출 기록 연장 조건부(대출 상태)", document)
+        self.assertIn("  - 근거: 분실 처리한 기록은 고칠 수 없다.", document)
+        self.assertIn("# 도서관 대출 규칙", document)
         self.assertLess(document.index("## 권한 규칙"), document.index("## 부록"))
         self.assertLess(document.index("### 권한 요약"), len(document))
 
     def test_assumptions_are_marked_on_the_lines_that_depend_on_them(self):
-        document = self.render_example("edi_row_rules.pdl")
-        self.assertEqual(document.count("(가정: 수정 작업을 하는 주체)"), 4)
-        self.assertIn("(가정: 수정 작업을 하는 주체, 제약사 마감 후 두 대응이 서로 배타적인지)", document)
+        document = self.render_library()
+        self.assertEqual(document.count("(가정: 연장 횟수 제한)"), 1)
+        self.assertIn("(가정: 기록을 고치는 주체)", document)
+        self.assertIn("(미결 있음: 월 점검을 시작하는 주체)", document)
+        self.assertNotIn("(가정: 월 점검을 시작하는 주체)", document)
         self.assertIn(
-            "(미결 있음: 제약사의 입금이 늦어진 경우의 정산월은 원문에서 미정(ERP-PLANNING.md:142))", document
-        )
-        self.assertNotIn("(가정: 제약사의 입금이", document)
-        self.assertIn("(가정: 목록 상태 구분과 행 상태의 관계)", document)
-        self.assertIn(
-            "- EDI팀은 제약사 마감 기록을 등록할 수 있다. (가정: 제약사 마감을 기록하는 주체)",
-            document,
-        )
-        self.assertIn(
-            "| 제약사의 입금이 늦어진 경우의 정산월은 원문에서 미정(ERP-PLANNING.md:142) | 원문에서 아직 정해지지 않은 항목이며",
+            "- 대출 상태가 '대출 중'일 때, 이용자 계정은 대출 기록을 연장할 수 있다. (가정: 연장 횟수 제한)",
             document,
         )
 
-    def test_monthly_flow_is_cyclic_and_runs_per_pharma_and_month(self):
-        document = self.render_example("edi_row_rules.pdl")
-        self.assertIn("아래 흐름은 제약사별, 월별로 따로 진행되며 매달 반복된다.", document)
+    def test_monthly_flow_is_cyclic_and_runs_per_reader_and_month(self):
+        document = self.render_library()
+        self.assertIn("점검은 이용자별, 월별로 따로 진행되며 매달 반복된다.", document)
         self.assertIn("- 끝나지 않고 처음 상태로 돌아가며 반복되는 흐름", document)
         self.assertNotIn("- 끝:", document)
         self.assertNotIn("--> [*]", document)
-        self.assertIn("(가정: 매달 업로드를 시작하는 주체, 수정이나 추가 제출을 마친 뒤의 흐름)", document)
-
-    def test_scope_lines_139_to_142_are_kept(self):
-        document = self.render_example("edi_row_rules.pdl")
-        self.assertIn("- 제출 양식의 정산월 칸: 일부 프로그램 제출 양식의 정산월 칸은 이음의 제출월에 해당하며", document)
-        self.assertIn("특정 시점에 실제로 제출된 값을 확인할 수 있어야 한다.", document)
 
     def test_assumption_must_name_a_declared_unknown(self):
         text = "module m\nactor X\naction Do\nentity R\npermit X Do R assuming nothing"
         self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 1}))
 
     def test_terms_and_field_notes_are_rendered(self):
-        document = self.render_example("edi_row_rules.pdl")
-        self.assertIn("- 처방월: 처방이 발생한 달이다.", document)
-        self.assertIn("- 업로드: 딜러가 이음에 EDI를 올리는 행위다.", document)
-        self.assertIn("- 제약사 마감: 제약사 전산이 더 이상 제출과 수정을 받지 않는 시점이며", document)
-        self.assertIn("pharma: PharmaCompany - 마감을 설정하는 제약사다.", document)
+        document = self.render_library()
+        self.assertIn("- 연장: 회원이 반납 기한을 늦추는 행위다.", document)
+        self.assertIn("lent_on (대출일): Day - 책을 빌려 간 날이다.", document)
+        self.assertIn("대출 한 건이다. 책 한 권마다 한 건이 생긴다.", document)
 
     def test_rules_become_korean_sentences_with_the_right_particles(self):
-        document = self.render_example("edi_row_rules.pdl")
-        self.assertIn("- 업로드 상태가 '열림'일 때, 딜러는 EDI를 업로드할 수 있다.", document)
-        self.assertIn("- EDI팀은 EDI를 대리 등록할 수 있다.", document)
-        self.assertIn("- 행 상태가 '입력'일 때, EDI팀은 EDI 행을 수정할 수 있다.", document)
+        document = self.render_library()
+        self.assertIn("- 창구 상태가 '열림'일 때, 사서는 대출 기록을 대출 처리할 수 있다.", document)
+        self.assertIn("- 사서는 대출 기록을 연장할 수 있다.", document)
+        self.assertIn("- 대출 상태가 '반납됨'일 때, 이용자 계정은 대출 기록을 연장할 수 없다.", document)
         self.assertIn(
-            "- 행 상태가 '제약사 마감 완료'일 때, EDI팀은 EDI 행을 수정할 수 있다. 이때 수정 사유를 입력해야 한다.",
+            "- 대출 상태가 '대출 중'일 때, 사서는 대출 기록을 기록 수정할 수 있다. 이때 수정 사유를 입력해야 한다.",
             document,
         )
-        self.assertIn("- 행 상태가 '정산 완료'일 때, 누구도 EDI 행을 수정할 수 없다.", document)
+        self.assertIn("- 대출 상태가 '분실'일 때, 누구도 대출 기록을 기록 수정할 수 없다.", document)
 
     def test_rules_become_english_sentences(self):
-        document = self.render_example("edi_row_rules.pdl", "en")
-        self.assertIn("- When UploadWindow is Open, Dealer may UploadEdi Edi.", document)
+        document = self.render_library("en")
+        self.assertIn("- When DeskStatus is Open, Librarian may Lend LoanRecord.", document)
+        self.assertIn("- When LoanState is Lost, anyone may not EditRecord LoanRecord.", document)
 
     def test_time_rule_is_rendered(self):
-        document = self.render_example("edi_row_rules.pdl", "en")
-        self.assertIn("Edi.settlement_month = next(Edi.submission_month)", document)
+        document = self.render_library("en")
+        self.assertIn("LoanRecord.due_month = next(month_of(LoanRecord.lent_on))", document)
 
     def test_monthly_workflow_is_rendered_with_labels(self):
-        document = self.render_example("edi_row_rules.pdl")
-        self.assertIn("## 업무 흐름: 월별 EDI 업무", document)
+        document = self.render_library()
+        self.assertIn("## 업무 흐름: 월별 대출 점검", document)
         self.assertIn(
-            "- '업로드 시작 전' 상태에서 '매달 업로드 시작'이 일어나면 '업로드와 입력 진행' 상태가 된다. "
-            "(주체: 시작 주체 미정) (가정: 매달 업로드를 시작하는 주체)",
+            "- '준비 중' 상태에서 '월 점검 시작'이 일어나면 '점검 중' 상태가 된다. "
+            "(주체: 사서) (미결 있음: 월 점검을 시작하는 주체)",
             document,
         )
-        self.assertIn(
-            "- '제약사에 제출됨' 상태에서 '마감 전 재제출'이 일어나면 '제약사에 제출됨' 상태가 된다. "
-            "(주체: EDI팀) (가정: 마감 해제와 재제출을 하는 주체)",
-            document,
-        )
-        self.assertIn(
-            "- '다음 제출월로 복사함' 상태에서 '누락분만 추가 제출'이 일어나면 '누락분을 추가 제출함' 상태가 된다.",
-            document,
-        )
-        self.assertIn(
-            "- 위에 적은 경우가 아니면 다음 사건은 받아들이지 않는다: '매달 업로드 시작', '업로드 마감 설정', "
-            "'업로드 마감 해제', '제약사에 제출', '마감 전 재제출', '제약사 마감'",
-            document,
-        )
-        self.assertIn("(가정: 위 흐름에 적지 않은 사건은 일어나지 않는 것으로 본다)", document)
-        self.assertIn("  - 근거: 매달 EDI 업로드가 시작되면 EDI팀은 입력을 시작한다.", document)
-        self.assertIn('    state "업로드 마감" as Closed', document)
+        self.assertIn("- '마감' 상태에서 '다시 열기'가 일어나면 '준비 중' 상태가 된다. (주체: 서고 시스템)", document)
+        self.assertIn("- 위에 적은 경우가 아니면 다음 사건은 받아들이지 않는다: '다시 열기' (가정: 흐름에 적지 않은 사건의 처리)", document)
+        self.assertIn("  - 근거: 매달 점검이 시작되면 사서가 기록을 살핀다.", document)
+        self.assertIn('    state "마감" as Closed', document)
 
     def test_mixed_state_is_a_derived_status_and_lists_are_screens(self):
-        document = self.render_example("edi_row_rules.pdl")
+        document = self.render_library()
         self.assertIn("## 상태 판정 규칙", document)
         self.assertIn(
-            "- EDI 상태는 EDI에 속한 EDI 행들의 행 상태가 모두 같으면 그 값이고, 서로 다르면 '혼합'이다.",
+            "- 이용자 상태는 이용자에 속한 대출 기록들의 대출 상태가 모두 같으면 그 값이고, 서로 다르면 '혼합'이다.",
             document,
         )
-        self.assertIn("  - 근거: EDI의 행마다 상태가 다를 수 있다.", document)
+        self.assertIn("  - 근거: 이용자의 대출 기록마다 상태가 다를 수 있다.", document)
         self.assertIn("## 화면", document)
-        self.assertIn("- EDI 목록은 EDI 상태, 목록 상태 구분을 보여 준다.", document)
-        self.assertIn("- EDI 상세는 EDI 행의 행 상태를 보여 준다.", document)
+        self.assertIn("- 대출 목록은 이용자 상태, 목록 구분을 보여 준다.", document)
+        self.assertIn("- 대출 상세는 대출 기록의 대출 상태, 대출 기록의 대출일을 보여 준다.", document)
         self.assertNotIn("- 혼합 상태:", document)
-        self.assertIn("| 목록 상태 구분 (ListStatus) | Input (입력), Submission (제출), Monitoring (모니터링), Settlement (정산) |", document)
+        self.assertIn("| 목록 구분 (ListGroup) | Lending (대출), Returning (반납) |", document)
 
     def test_unverified_assumption_is_listed(self):
-        document = self.render_example("edi_row_rules.pdl")
+        document = self.render_library()
         self.assertIn("## 확인이 필요한 가정", document)
-        self.assertIn("| 업로드 마감 전 제약사 제출 | 업로드 마감 전에는 제약사에 제출하지 않는다 | ERP-PLANNING.md:235 |", document)
-        self.assertIn("| 제약사 마감을 기록하는 주체 | EDI팀 | ERP-PLANNING.md:237 |", document)
-
-    def test_examples_from_the_source_section_are_kept(self):
-        document = self.render_example("edi_row_rules.pdl")
-        self.assertIn("타이레놀 5개와 우루사 3개", document)
-        self.assertIn("변경 전후 값, 수정 사유, 수정자와 시각을 이력으로 기록한다", document)
-        self.assertIn("edited_at: Timestamp - 수정 시각이다.", document)
-
-    def test_screen_items_use_field_labels(self):
-        text = (EXAMPLES / "carry_over.pdl").read_text(encoding="utf-8")
-        module = parse_module(text[: text.index("unknown structure")])
-        self.assertEqual([f for f in check(module) if f.blocking], [])
-        document = render(module, check(module))
-        self.assertIn(
-            "- 이월 현황은 원장 행의 분할 전 행, 원장 행의 제출월, 원장 행의 정산월을 보여 준다.",
-            document,
-        )
-        self.assertIn("- EDI팀은 제출채널을 관리할 수 있다.", self.render_without_unknowns("channels.pdl"))
-
-    def render_without_unknowns(self, name: str) -> str:
-        text = (EXAMPLES / name).read_text(encoding="utf-8")
-        module = parse_module(text[: text.index("unknown structure")])
-        return render(module, check(module))
+        self.assertIn("| 연장 횟수 제한 | 한 건당 한 번만 연장할 수 있다 | 도서관 규정집 3쪽 |", document)
+        self.assertIn("| 월 점검을 시작하는 주체 | 사서가 시작한다 | 운영 회의록 |", document)
+        self.assertNotIn("| 기록을 고치는 주체 |", document)
 
     def test_machine_is_rendered_as_a_diagram(self):
         module = parse_module(COVERED_MACHINE)

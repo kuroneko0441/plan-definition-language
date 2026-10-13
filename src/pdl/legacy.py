@@ -315,9 +315,8 @@ class Parser:
         label = self.label()
         self.expect("of")
         entity = self.word()
-        self.expect("shows")
-        shows = [self.shown_item()]
-        while self.accept(","):
+        shows = [self.shown_item()] if self.accept("shows") else []
+        while shows and self.accept(","):
             shows.append(self.shown_item())
         assumes = self.assumptions()
         module.screens.append(Screen(line, name, entity, shows, label, self.why(), assumes))

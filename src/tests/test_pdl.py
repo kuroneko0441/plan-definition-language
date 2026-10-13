@@ -1229,6 +1229,28 @@ class SyntaxTest(unittest.TestCase):
             self.assertEqual(document_lines(after), document_lines(before), text[:60])
             self.assertEqual(to_text(after, imports=False), to_text(before, imports=False), text[:60])
 
+    def test_a_computed_value_names_its_type_and_its_sources(self):
+        base = (
+            "module m\nBill passive { month: Month }\nLine passive { bill: Bill, amount: Money }\n"
+            "Other passive { amount: Money }\n"
+        )
+        good = base + "derive Total of Bill : Money from Line.amount, Line\nscreen Bills of Bill shows Total, Bill.month\n"
+        good += 'text { Total "총금액" Bill "청구서" Line "청구 행" Line.amount "금액" }\n'
+        self.assertEqual(self.kinds(good), Counter())
+        module = syntax.parse_module(good)
+        self.assertIn("- 총금액은 청구서의 계산값(Money)이며 청구 행의 금액, 청구 행에서 계산한다.", render(module, check(module)))
+        self.assertIn("- Total of Bill is a computed Money from Line.amount, Line.", render(module, check(module), "en"))
+        for statement, part in (
+            ("derive Total of Bill : Money from Other.amount", "is not linked to Bill"),
+            ("derive Total of Bill : Money from Line.missing", "is not a field"),
+            ("derive Total of Bill : Money from Ghost", "is not an entity, a field, or a computed value"),
+            ("derive Total of Bill : Cash from Line.amount", "type Cash of Total is not defined"),
+            ("derive Total of Bill : Money from Net\nderive Net of Bill : Money from Total", "is computed from itself"),
+        ):
+            messages = [f.message for f in check(syntax.parse_module(base + statement + "\n")) if f.kind == "UNDEFINED"]
+            self.assertTrue(any(part in message for message in messages), statement)
+        self.assertEqual(to_text(module), to_text(syntax.parse_module(to_text(module))))
+
     def test_the_convert_command_rewrites_a_keyword_module(self):
         import contextlib
         import io

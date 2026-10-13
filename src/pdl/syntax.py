@@ -140,6 +140,7 @@ class Parser:
         self.runs: list[Run] = []
         self.texts: list[TextEntry] = []
         self.tags: dict[tuple[str, ...], list] = {}
+        self.named_texts: dict[str, int] = {}
 
     def peek(self, offset: int = 0) -> Token | None:
         position = self.index + offset
@@ -508,11 +509,19 @@ class Parser:
         name = self.word()
         self.expect("of")
         entity = self.word()
-        self.expect("from")
-        source = self.word()
-        self.expect("mixed")
-        mixed = self.word()
-        module.derivations.append(Derivation(line, name, entity, source, mixed, assumes=self.assumptions()))
+        if self.accept(":"):
+            derivation = Derivation(line, name, entity, "", "", type=self.word())
+            self.expect("from")
+            derivation.sources = [self.path()]
+            while self.accept(","):
+                derivation.sources.append(self.path())
+        else:
+            self.expect("from")
+            source = self.word()
+            self.expect("mixed")
+            derivation = Derivation(line, name, entity, source, self.word())
+        derivation.assumes = self.assumptions()
+        module.derivations.append(derivation)
         module.definitions.append(("derive", name, line))
 
     def screen(self, module: Module) -> None:
@@ -660,6 +669,13 @@ class Parser:
             Scenario(run.line, run.name, machine, start[machine], events, expect[machine], run.start[1:])
         )
 
+    def holds(self, owner: object, member: str) -> bool:
+        if isinstance(owner, EnumDefinition):
+            return member in owner.values
+        if isinstance(owner, EntityDefinition):
+            return member in dict(owner.fields)
+        return isinstance(owner, Machine) and member in (*owner.states, *owner.events, *owner.counters)
+
     def place_text(self, module: Module, machines: dict[str, Machine], entry: TextEntry) -> None:
         key = entry.key
         text = entry.attributes
@@ -674,19 +690,22 @@ class Parser:
                 if isinstance(item, Transition):
                     item.after = text.get("after", "")
             return
-        owners = {
-            definition.name: definition
+        candidates = [
+            definition
             for group in (
                 module.terms, module.enums, module.entities, module.declarations, module.machines, module.constants,
                 module.derivations, module.screens, module.invariants, module.premises, module.assertions,
             )
-            for definition in reversed(group)
-        }
-        owners.update({law.identifier: law for law in module.laws})
-        owner = owners.get(key[0])
-        if owner is None or len(key) > 2:
+            for definition in group
+            if definition.name == key[0]
+        ]
+        candidates += [law for law in module.laws if law.identifier == key[0]]
+        if not candidates or len(key) > 2:
             raise PdlSyntaxError(entry.line, f"text names {'.'.join(key)}, which is not defined")
         if len(key) == 1:
+            seen = self.named_texts.get(key[0], 0)
+            self.named_texts[key[0]] = seen + 1
+            owner = candidates[min(seen, len(candidates) - 1)]
             if label:
                 owner.label = label
             if why:
@@ -695,6 +714,7 @@ class Parser:
                 owner.mixed_label = text["mixed"]
             return
         member = key[1]
+        owner = next((candidate for candidate in candidates if self.holds(candidate, member)), candidates[0])
         if isinstance(owner, EnumDefinition) and member in owner.values:
             if label:
                 owner.value_labels[member] = label

@@ -40,7 +40,8 @@ def collect(path: Path, module: Module) -> dict[str, Entry]:
     for declaration in module.declarations:
         add(declaration.name, declaration.line, declaration.kind, (), declaration.label)
     for derivation in module.derivations:
-        add(derivation.name, derivation.line, "derive", (derivation.entity, derivation.source, derivation.mixed), derivation.label)
+        signature = (derivation.entity, derivation.source, derivation.mixed, derivation.type, tuple(derivation.sources))
+        add(derivation.name, derivation.line, "derive", signature, derivation.label)
     for screen in module.screens:
         add(screen.name, screen.line, "screen", (screen.entity, tuple(screen.shows)), screen.label)
     for machine in module.machines:

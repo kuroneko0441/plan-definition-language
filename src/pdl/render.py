@@ -194,7 +194,23 @@ def render_views(module: Module, labels: dict[str, str], names: Names, language:
             rows = row_entities(module, derivation.entity, derivation.source) or ["?"]
             mixed = derivation.mixed_label if language == "ko" and derivation.mixed_label else derivation.mixed
             note = assumption_text(derivation.assumes, module, labels)
-            if language == "ko":
+            if derivation.type:
+                sources = []
+                for source in derivation.sources:
+                    owner, _, attribute = source.partition(".")
+                    shown = f"{names.show(owner)}의 {names.field(owner, attribute)}" if attribute else names.show(owner)
+                    sources.append(shown if language == "ko" else source)
+                if language == "ko":
+                    lines.append(
+                        f"- {attach(names.show(derivation.name), '은', '는')} {names.show(derivation.entity)}의 "
+                        f"계산값({derivation.type})이며 {', '.join(sources)}에서 계산한다.{note}"
+                    )
+                else:
+                    lines.append(
+                        f"- {derivation.name} of {derivation.entity} is a computed {derivation.type}"
+                        f" from {', '.join(sources)}.{note}"
+                    )
+            elif language == "ko":
                 lines.append(
                     f"- {attach(names.show(derivation.name), '은', '는')} {names.show(derivation.entity)}에 속한 "
                     f"{names.show(rows[0])}들의 {attach(names.show(derivation.source), '이', '가')} 모두 같으면 "

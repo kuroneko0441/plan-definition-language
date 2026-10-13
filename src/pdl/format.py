@@ -197,10 +197,12 @@ class Writer:
         self.section(lines)
         lines = []
         for derivation in module.derivations:
-            lines.append(
-                f"derive {derivation.name} of {derivation.entity} from {derivation.source}"
-                f" mixed {derivation.mixed}{assuming(derivation.assumes)}"
+            form = (
+                f": {derivation.type} from {', '.join(derivation.sources)}"
+                if derivation.type
+                else f"from {derivation.source} mixed {derivation.mixed}"
             )
+            lines.append(f"derive {derivation.name} of {derivation.entity} {form}{assuming(derivation.assumes)}")
             self.text(derivation.name, derivation.label, why=derivation.why, mixed=derivation.mixed_label)
         for screen in module.screens:
             lines.append(f"screen {screen.name} of {screen.entity} shows {', '.join(screen.shows)}{assuming(screen.assumes)}")

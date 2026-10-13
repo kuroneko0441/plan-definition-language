@@ -48,6 +48,8 @@ class Derivation:
     mixed_label: str = ""
     why: str = ""
     assumes: list[str] = field(default_factory=list)
+    type: str = ""
+    sources: list[str] = field(default_factory=list)
 
 
 @dataclass

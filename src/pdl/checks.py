@@ -12,6 +12,7 @@ from .model import (
     Atom,
     Call,
     Can,
+    Derivation,
     EnumDefinition,
     ForAll,
     Formula,
@@ -409,13 +410,56 @@ def check_invariants(module: Module, index: Index) -> list[Finding]:
     ]
 
 
+def linked(index: Index, first: str, second: str) -> bool:
+    def refers(owner: str, target: str) -> bool:
+        entity = index.entities.get(owner)
+        return entity is not None and any(base_type(kind).removeprefix("list ") == target for _, kind in entity.fields)
+
+    return first == second or refers(first, second) or refers(second, first)
+
+
+def check_computed(derivation: Derivation, computed: dict[str, Derivation], index: Index) -> list[Finding]:
+    findings = []
+    name = derivation.name
+    if derivation.type not in BUILTIN_TYPES and derivation.type not in index.enums:
+        findings.append(Finding("UNDEFINED", f"type {derivation.type} of {name} is not defined", derivation.line))
+    reached = set()
+    pending = list(derivation.sources)
+    while pending:
+        source = pending.pop()
+        if source in computed and source not in reached:
+            reached.add(source)
+            pending += computed[source].sources
+    if name in reached:
+        findings.append(Finding("UNDEFINED", f"{name} is computed from itself", derivation.line))
+    for source in derivation.sources:
+        owner, _, attribute = source.partition(".")
+        if source in computed:
+            owner = computed[source].entity
+        elif owner not in index.entities:
+            findings.append(Finding("UNDEFINED", f"source {source} of {name} is not an entity, a field, or a computed value", derivation.line))
+            continue
+        elif attribute and attribute not in dict(index.entities[owner].fields):
+            findings.append(Finding("UNDEFINED", f"source {source} of {name} is not a field", derivation.line))
+            continue
+        if derivation.entity in index.entities and not linked(index, derivation.entity, owner):
+            findings.append(
+                Finding("UNDEFINED", f"source {source} of {name} is not linked to {derivation.entity} by a field", derivation.line)
+            )
+    return findings
+
+
 def check_views(module: Module, index: Index) -> list[Finding]:
     findings = []
     derived = {derivation.name for derivation in module.derivations}
+    computed = {derivation.name: derivation for derivation in module.derivations if derivation.type}
     for derivation in module.derivations:
         enum = index.enums.get(derivation.source)
         if derivation.entity not in index.entities:
             findings.append(Finding("UNDEFINED", f"entity {derivation.entity} of {derivation.name} is not defined", derivation.line))
+        if derivation.type:
+            findings.extend(check_computed(derivation, computed, index))
+            continue
         if enum is None:
             findings.append(Finding("UNDEFINED", f"enum {derivation.source} of {derivation.name} is not defined", derivation.line))
             continue

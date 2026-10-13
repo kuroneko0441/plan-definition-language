@@ -5,14 +5,6 @@ from typing import Union
 
 
 @dataclass
-class Condition:
-    variable: str
-    value: str = ""
-    operator: str = "="
-    values: list[str] = field(default_factory=list)
-
-
-@dataclass
 class EnumDefinition:
     line: int
     name: str
@@ -85,7 +77,7 @@ class Rule:
     actor: str
     action: str
     resource: str
-    conditions: list[Condition]
+    conditions: list["Formula"]
     requires: str = ""
     why: str = ""
     assumes: list[str] = field(default_factory=list)
@@ -94,8 +86,8 @@ class Rule:
 @dataclass
 class Exclusion:
     line: int
-    left: Condition
-    right: Condition
+    left: "Formula"
+    right: "Formula"
 
 
 @dataclass
@@ -107,7 +99,7 @@ class Transition:
     actors: list[str] = field(default_factory=list)
     why: str = ""
     assumes: list[str] = field(default_factory=list)
-    conditions: list[Condition] = field(default_factory=list)
+    conditions: list["Formula"] = field(default_factory=list)
     effects: list[tuple[str, str, int]] = field(default_factory=list)
     after: str = ""
 
@@ -124,7 +116,7 @@ class Handling:
     event: str
     why: str = ""
     assumes: list[str] = field(default_factory=list)
-    conditions: list[Condition] = field(default_factory=list)
+    conditions: list["Formula"] = field(default_factory=list)
 
 
 @dataclass
@@ -154,7 +146,7 @@ class Scenario:
     start: str
     events: list[str]
     expect: str
-    given: list[Condition] = field(default_factory=list)
+    given: list["Formula"] = field(default_factory=list)
 
 
 @dataclass
@@ -241,13 +233,35 @@ class ForAll:
     body: "Formula"
 
 
-Formula = Union[Atom, InSet, Not, And, Or, Implies, ForAll]
+@dataclass
+class Can:
+    operand: "Formula"
+
+
+Formula = Union[Atom, InSet, Not, And, Or, Implies, ForAll, Can]
 
 
 @dataclass
 class Invariant:
     line: int
     name: str
+    formula: Formula
+    why: str = ""
+
+
+@dataclass
+class Premise:
+    line: int
+    name: str
+    formula: Formula
+    why: str = ""
+
+
+@dataclass
+class Assertion:
+    line: int
+    name: str
+    mode: str
     formula: Formula
     why: str = ""
 
@@ -267,6 +281,8 @@ class Module:
     rules: list[Rule] = field(default_factory=list)
     exclusions: list[Exclusion] = field(default_factory=list)
     invariants: list[Invariant] = field(default_factory=list)
+    premises: list[Premise] = field(default_factory=list)
+    assertions: list[Assertion] = field(default_factory=list)
     machines: list[Machine] = field(default_factory=list)
     scenarios: list[Scenario] = field(default_factory=list)
     joint_scenarios: list[JointScenario] = field(default_factory=list)

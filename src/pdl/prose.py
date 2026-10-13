@@ -1,6 +1,6 @@
 """Deterministic sentences for rules, built from labels and Korean particle rules."""
 
-from .model import Condition, Module, Rule
+from .model import And, Atom, Can, ForAll, Formula, Implies, InSet, Module, Not, Or, Rule
 
 HANGUL_FIRST = 0xAC00
 HANGUL_LAST = 0xD7A3
@@ -73,35 +73,64 @@ def attach(text: str, with_consonant: str, without_consonant: str) -> str:
     return text + (with_consonant if has_final_consonant(text) else without_consonant)
 
 
-def korean_condition(conditions: list[Condition], names: Names) -> str:
+PRECEDENCE = {Implies: 1, Or: 2, And: 3}
+
+
+def formula_text(formula: Formula, parent: int = 0) -> str:
+    if isinstance(formula, Atom):
+        return f"{formula.left} {'=' if formula.operator == '=' else '≠'} {formula.right}"
+    if isinstance(formula, InSet):
+        return f"{formula.left} ∈ {{{', '.join(formula.values)}}}"
+    if isinstance(formula, Not):
+        return f"¬({formula_text(formula.operand)})"
+    if isinstance(formula, Can):
+        return f"can ({formula_text(formula.operand)})"
+    if isinstance(formula, ForAll):
+        text = f"∀ {formula.variable} ∈ {formula.enum} : {formula_text(formula.body)}"
+        return f"({text})" if parent else text
+    level = PRECEDENCE[type(formula)]
+    if isinstance(formula, Implies):
+        text = f"{formula_text(formula.premise, level + 1)} ⇒ {formula_text(formula.conclusion, level)}"
+    else:
+        joiner = " ∧ " if isinstance(formula, And) else " ∨ "
+        text = joiner.join(formula_text(operand, level + 1) for operand in formula.operands)
+    return f"({text})" if parent > level else text
+
+
+def korean_condition(conditions: list[Formula], names: Names) -> str:
     phrases = []
     for position, condition in enumerate(conditions):
         last = position == len(conditions) - 1
-        subject = attach(names.show(condition.variable), "이", "가")
-        if condition.operator == "in":
-            options = " 또는 ".join(f"'{names.value(condition.variable, v)}'" for v in condition.values)
+        if isinstance(condition, InSet):
+            subject = attach(names.show(condition.left), "이", "가")
+            options = " 또는 ".join(f"'{names.value(condition.left, v)}'" for v in condition.values)
             phrases.append(f"{subject} {options}" + ("일 때" if last else "이고"))
-        elif condition.operator == "!=":
-            shown = names.value(condition.variable, condition.value)
+        elif isinstance(condition, Atom) and condition.operator == "!=":
+            subject = attach(names.show(condition.left), "이", "가")
+            shown = names.value(condition.left, condition.right)
             phrases.append(
                 f"{subject} '{shown}'" + ("이" if has_final_consonant(shown) else "가") + (" 아닐 때" if last else " 아니고")
             )
-        else:
-            shown = names.value(condition.variable, condition.value)
+        elif isinstance(condition, Atom):
+            subject = attach(names.show(condition.left), "이", "가")
+            shown = names.value(condition.left, condition.right)
             phrases.append(f"{subject} '{shown}'" + ("일 때" if last else "이고"))
+        else:
+            phrases.append(f"`{formula_text(condition)}` 조건이 " + ("성립할 때" if last else "성립하고"))
     return " ".join(phrases)
 
 
-def english_condition(conditions: list[Condition], names: Names) -> str:
+def english_condition(conditions: list[Formula], names: Names) -> str:
     parts = []
     for condition in conditions:
-        variable = names.show(condition.variable)
-        if condition.operator == "in":
-            parts.append(f"{variable} is one of {', '.join(condition.values)}")
-        elif condition.operator == "!=":
-            parts.append(f"{variable} is not {condition.value}")
+        if isinstance(condition, InSet):
+            parts.append(f"{names.show(condition.left)} is one of {', '.join(condition.values)}")
+        elif isinstance(condition, Atom) and condition.operator == "!=":
+            parts.append(f"{names.show(condition.left)} is not {condition.right}")
+        elif isinstance(condition, Atom):
+            parts.append(f"{names.show(condition.left)} is {names.value(condition.left, condition.right)}")
         else:
-            parts.append(f"{variable} is {names.value(condition.variable, condition.value)}")
+            parts.append(f"`{formula_text(condition)}` holds")
     return " and ".join(parts)
 
 

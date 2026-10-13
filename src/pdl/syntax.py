@@ -6,9 +6,10 @@ from typing import NamedTuple
 
 from .model import (
     And,
+    Assertion,
     Atom,
     Call,
-    Condition,
+    Can,
     Declaration,
     Derivation,
     EntityDefinition,
@@ -25,6 +26,7 @@ from .model import (
     Module,
     Not,
     Or,
+    Premise,
     Reference,
     Rule,
     JointScenario,
@@ -87,6 +89,7 @@ class Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
         self.index = 0
+        self.temporal = False
 
     def peek(self, offset: int = 0) -> Token | None:
         position = self.index + offset
@@ -161,25 +164,11 @@ class Parser:
         self.expect(")")
         return words
 
-    def condition(self) -> Condition:
-        variable = self.word()
-        if self.accept("in"):
-            self.expect("{")
-            values = self.comma_words()
-            self.expect("}")
-            return Condition(variable, operator="in", values=values)
-        token = self.advance()
-        if token.kind == "string" or token.value not in ("=", "!="):
-            raise PdlSyntaxError(token.line, f"expected =, != or in but found {token.value!r}")
-        return Condition(variable, self.word(), token.value)
-
-    def conditions_after(self, keyword: str) -> list[Condition]:
-        conditions: list[Condition] = []
-        if self.accept(keyword):
-            conditions.append(self.condition())
-            while self.accept("and"):
-                conditions.append(self.condition())
-        return conditions
+    def conditions_after(self, keyword: str) -> list[Formula]:
+        if not self.accept(keyword):
+            return []
+        formula = self.implication()
+        return list(formula.operands) if isinstance(formula, And) else [formula]
 
     def effects(self) -> list[tuple[str, str, int]]:
         effects: list[tuple[str, str, int]] = []
@@ -215,6 +204,8 @@ class Parser:
             "forbid": self.rule,
             "exclusive": self.exclusive,
             "invariant": self.invariant,
+            "assume": self.premise,
+            "assert": self.assertion,
             "machine": self.machine,
             "scenario": self.scenario,
             "unknown": self.unknown,
@@ -360,9 +351,9 @@ class Parser:
 
     def exclusive(self, module: Module) -> None:
         line = self.expect("exclusive").line
-        left = self.condition()
+        left = self.unary()
         self.expect(",")
-        module.exclusions.append(Exclusion(line, left, self.condition()))
+        module.exclusions.append(Exclusion(line, left, self.unary()))
 
     def invariant(self, module: Module) -> None:
         line = self.expect("invariant").line
@@ -371,6 +362,27 @@ class Parser:
         formula = self.implication()
         module.invariants.append(Invariant(line, name, formula, self.why()))
         module.definitions.append(("invariant", name, line))
+
+    def premise(self, module: Module) -> None:
+        line = self.expect("assume").line
+        name = self.word()
+        self.expect(":")
+        formula = self.implication()
+        module.premises.append(Premise(line, name, formula, self.why()))
+        module.definitions.append(("assume", name, line))
+
+    def assertion(self, module: Module) -> None:
+        line = self.expect("assert").line
+        name = self.word()
+        self.expect(":")
+        token = self.advance()
+        if token.kind != "word" or token.value not in ("always", "reachable"):
+            raise PdlSyntaxError(token.line, f"expected always or reachable but found {token.value!r}")
+        self.temporal = True
+        formula = self.implication()
+        self.temporal = False
+        module.assertions.append(Assertion(line, name, token.value, formula, self.why()))
+        module.definitions.append(("assert", name, line))
 
     def implication(self) -> Formula:
         premise = self.disjunction()
@@ -393,6 +405,11 @@ class Parser:
     def unary(self) -> Formula:
         if self.accept("not"):
             return Not(self.unary())
+        token = self.peek()
+        if self.temporal and self.accept("can"):
+            return Can(self.unary())
+        if token is not None and token.kind == "word" and token.value == "can":
+            raise PdlSyntaxError(token.line, "can is allowed only inside assert")
         if self.accept("forall"):
             variable = self.word()
             self.expect("in")

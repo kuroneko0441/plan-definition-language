@@ -742,6 +742,109 @@ class SystemSemanticsTest(unittest.TestCase):
         self.assertIn("at the start", messages[0])
 
 
+FREE_PAIR = CROSS_MACHINES.replace("invariant done_needs_ok: T = Done => P = Ok\n", "")
+
+
+class FormulaTest(unittest.TestCase):
+    def test_a_rule_condition_takes_a_full_formula(self):
+        base = "module m\nenum S = A | B | C\nactor X\naction Do\nentity R\n"
+        covered = base + "permit X Do R when S = A or S = B\nforbid X Do R when not (S = A or S = B)\n"
+        self.assertEqual(blocking_kinds(covered), Counter())
+        gap = base + "permit X Do R when S = A or S = B\n"
+        self.assertEqual(blocking_kinds(gap), Counter({"UNCOVERED": 1}))
+
+    def test_a_guard_takes_a_full_formula(self):
+        text = GUARDED.replace("enum G = On | Off", "enum G = On | Off | Hold").replace("when G = Off", "when G = Off or G = Hold")
+        self.assertEqual(blocking_kinds(text), Counter())
+        overlapping = text.replace("when G = On", "when not G = Off")
+        self.assertEqual(blocking_kinds(overlapping), Counter({"CONTRADICTION": 1}))
+
+    def test_a_formula_guard_is_rendered_as_a_formula(self):
+        module = parse_module(GUARDED.replace("when G = Off", "when G = Off or G = On => G = Off"))
+        self.assertIn("when `G = Off ∨ G = On ⇒ G = Off` holds", render(module, check(module), "en"))
+        self.assertIn("`G = Off ∨ G = On ⇒ G = Off` 조건이 성립할 때", render(module, check(module), "ko"))
+
+    def test_a_scenario_is_replayed_in_every_given_world(self):
+        passing = GUARDED + "scenario s on M { start A given G = On or G = Off events Go, Go expect B }\n"
+        findings = [f for f in check(parse_module(passing)) if f.blocking]
+        self.assertEqual([f.kind for f in findings], ["SCENARIO_FAILED"])
+        self.assertIn("ends in C instead of B when G=Off", findings[0].message)
+        empty = GUARDED + "scenario s on M { start A given G = On and G = Off events Go expect B }\n"
+        self.assertEqual(blocking_kinds(empty), Counter({"SCENARIO_FAILED": 1}))
+
+
+class PremiseTest(unittest.TestCase):
+    def test_an_assumption_removes_worlds_without_being_checked(self):
+        counts = blocking_kinds(FLAGGED + "assume a: Flag = On => M = A\n")
+        self.assertEqual(counts["INVARIANT_VIOLATED"], 0)
+        self.assertEqual(counts["UNREACHABLE"], 1)
+
+    def test_an_exclusion_over_machine_states_removes_the_joint_state(self):
+        counts = blocking_kinds(FREE_PAIR + "exclusive T = Done, P = Bad\n")
+        self.assertEqual(counts["INVARIANT_VIOLATED"], 0)
+        self.assertEqual(counts["TRAP"], 2)
+
+    def test_assumptions_that_rule_out_the_start_contradict(self):
+        findings = [f for f in check(parse_module(FREE_PAIR + "assume a: T = Done\n")) if f.kind == "CONTRADICTION"]
+        self.assertEqual(len(findings), 1)
+        self.assertIn("rule out the start", findings[0].message)
+
+    def test_an_assumption_is_rendered_with_its_formula(self):
+        module = parse_module(FLAGGED + 'assume a: M = B => Flag = On why "The flag stays on."\n')
+        document = render(module, check(module), "en")
+        self.assertIn("## Premises\n\n- The flag stays on.", document)
+        self.assertIn("- a: `M = B ⇒ Flag = On`", document)
+
+
+class AssertionTest(unittest.TestCase):
+    def failures(self, text: str) -> list[str]:
+        return [f.message for f in check(parse_module(text)) if f.kind == "ASSERTION_FAILED"]
+
+    def test_always_reports_the_path_to_a_failing_state(self):
+        failures = self.failures(FREE_PAIR + "assert a: always T = Done => P = Ok\n")
+        self.assertEqual(len(failures), 1)
+        self.assertIn("assertion a fails after:", failures[0])
+        self.assertIn("(P=Bad, T=Done)", failures[0])
+
+    def test_always_passes_when_guards_keep_it(self):
+        self.assertEqual(self.failures(GUARDED_PAIR + "assert a: always T = Done => P = Ok\n"), [])
+
+    def test_always_reads_every_admissible_enum_value(self):
+        self.assertEqual(len(self.failures(FLAGGED + "assert a: always M = B => Flag = On\n")), 1)
+        kept = FLAGGED + "assume keep: M = B => Flag = On\nassert a: always M = B => Flag = On\n"
+        self.assertEqual(self.failures(kept), [])
+
+    def test_reachable_needs_one_state(self):
+        self.assertEqual(self.failures(FREE_PAIR + "assert r: reachable T = Done and P = Bad\n"), [])
+        failures = self.failures(GUARDED_PAIR + "assert r: reachable T = Done and P = Bad\n")
+        self.assertEqual(failures, ["assertion r holds in no reachable state"])
+
+    def test_can_reads_the_states_ahead(self):
+        failures = self.failures(GUARDED_PAIR + "assert live: always can T = Done\n")
+        self.assertEqual(failures, ["assertion live fails after: P: Fail (P=Bad, T=Open)"])
+        self.assertEqual(self.failures(GUARDED_PAIR + "assert live: always P = Ok => can T = Done\n"), [])
+
+    def test_an_assertion_needs_no_machine(self):
+        base = "module m\nenum S = A | B\nexclusive S = A, S = A\n"
+        self.assertEqual(self.failures(base + "assert a: always S = B\n"), [])
+        self.assertEqual(len(self.failures(base + "assert a: reachable S = A\n")), 1)
+
+    def test_an_assertion_names_defined_values(self):
+        self.assertEqual(blocking_kinds(FREE_PAIR + "assert a: always T = Gone\n")["UNDEFINED"], 1)
+
+    def test_can_and_the_mode_are_part_of_the_syntax(self):
+        with self.assertRaises(PdlSyntaxError):
+            parse_module(FREE_PAIR + "invariant i: can T = Done\n")
+        with self.assertRaises(PdlSyntaxError):
+            parse_module(FREE_PAIR + "assert a: T = Done\n")
+
+    def test_an_assertion_is_rendered_with_its_formula(self):
+        module = parse_module(GUARDED_PAIR + 'assert live: always P = Ok => can T = Done why "A good photo lets the task finish."\n')
+        document = render(module, check(module), "en")
+        self.assertIn("## Verified properties\n\n- A good photo lets the task finish.", document)
+        self.assertIn("- live: `always P = Ok ⇒ can (T = Done)`", document)
+
+
 class ConsistencyTest(unittest.TestCase):
     def kinds(self, *texts: str) -> Counter:
         modules = [(Path(f"m{number}.pdl"), parse_module(text)) for number, text in enumerate(texts)]

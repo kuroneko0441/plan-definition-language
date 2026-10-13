@@ -8,7 +8,7 @@ from .model import (
     And,
     Atom,
     Call,
-    Condition,
+    Can,
     EnumDefinition,
     ForAll,
     Formula,
@@ -21,6 +21,7 @@ from .model import (
     Or,
     Reference,
     Rule,
+    Scenario,
     Term,
     Transition,
 )
@@ -48,6 +49,29 @@ class Finding:
 class Outcome:
     assignment: dict[str, str]
     rules: list[Rule]
+
+
+@dataclass
+class System:
+    machines: list[Machine]
+    counter_order: list[str]
+    interesting: set[str]
+    seen: dict[tuple, tuple | None]
+    steps: dict[tuple, str]
+    behind: dict[tuple, list[tuple]]
+
+    def assignment(self, config: tuple) -> dict[str, str]:
+        states, values = config
+        result = {machine.name: state for machine, state in zip(self.machines, states)}
+        result.update({counter: str(value) for counter, value in zip(self.counter_order, values)})
+        return result
+
+    def path(self, config: tuple) -> str:
+        path = []
+        while self.seen[config] is not None:
+            path.append(self.steps[config])
+            config = self.seen[config]
+        return " -> ".join(reversed(path)) or "the start"
 
 
 class Index:
@@ -78,13 +102,16 @@ class Index:
         self.action_actors = {d.name: set(d.performed_by) for d in actions if d.performed_by}
         self.action_resources = {d.name: set(d.applies_to) for d in actions if d.applies_to}
         self.unknown_ids = {unknown.identifier for unknown in module.unknowns}
-        formulas = [invariant.formula for invariant in module.invariants]
-        for exclusion in module.exclusions:
-            both = [
-                Atom(c.variable, "=", c.value) for c in (exclusion.left, exclusion.right)
-            ]
-            formulas.append(Not(And(both)))
-        self.invariant_terms = [(formula, free_enums(formula, self)) for formula in formulas]
+        obligations = [invariant.formula for invariant in module.invariants]
+        premises = [Not(And([exclusion.left, exclusion.right])) for exclusion in module.exclusions]
+        premises += [premise.formula for premise in module.premises]
+        self.obligation_terms = [(formula, free_enums(formula, self)) for formula in obligations]
+        self.premise_terms = [(formula, free_enums(formula, self)) for formula in premises]
+        self.invariant_terms = self.obligation_terms + self.premise_terms
+        self.fact_line = min(
+            (item.line for item in (*module.invariants, *module.exclusions, *module.premises)), default=0
+        )
+        self.system: System | None = None
 
     def applies(self, action: str, actor: str, resource: str) -> bool:
         return actor in self.action_actors.get(action, {actor}) and resource in self.action_resources.get(
@@ -127,9 +154,11 @@ def evaluate(formula: Formula, assignment: dict[str, str], bound: dict[str, str]
         return not evaluate(formula.premise, assignment, bound, index) or evaluate(
             formula.conclusion, assignment, bound, index
         )
-    enum = index.enums.get(formula.enum)
-    values = enum.values if enum is not None else []
-    return all(evaluate(formula.body, assignment, {**bound, formula.variable: v}, index) for v in values)
+    if isinstance(formula, ForAll):
+        enum = index.enums.get(formula.enum)
+        values = enum.values if enum is not None else []
+        return all(evaluate(formula.body, assignment, {**bound, formula.variable: v}, index) for v in values)
+    raise TypeError(f"{type(formula).__name__} has no value in a single state")
 
 
 def free_enums(formula: Formula, index: Index, bound: frozenset[str] = frozenset()) -> set[str]:
@@ -143,20 +172,19 @@ def free_enums(formula: Formula, index: Index, bound: frozenset[str] = frozenset
         return set().union(*(free_enums(operand, index, bound) for operand in formula.operands))
     elif isinstance(formula, Implies):
         return free_enums(formula.premise, index, bound) | free_enums(formula.conclusion, index, bound)
-    else:
+    elif isinstance(formula, ForAll):
         return free_enums(formula.body, index, bound | {formula.variable})
+    else:
+        return set()
     return {term for term in terms if term in index.enums and term not in bound}
 
 
-def condition_holds(condition: Condition, assignment: dict[str, str]) -> bool:
-    current = assignment.get(condition.variable)
-    if current is None:
-        return False
-    if condition.operator == "in":
-        return current in condition.values
-    if condition.operator == "!=":
-        return current != condition.value
-    return current == condition.value
+def guard_enums(conditions: list[Formula], index: Index) -> set[str]:
+    return set().union(*(free_enums(condition, index) for condition in conditions))
+
+
+def condition_holds(condition: Formula, assignment: dict[str, str], index: Index) -> bool:
+    return free_enums(condition, index) <= assignment.keys() and evaluate(condition, assignment, {}, index)
 
 
 def worlds(index: Index, variables: set[str]) -> list[dict[str, str]] | None:
@@ -191,19 +219,14 @@ def triple_outcomes(
     module: Module, index: Index, actor: str, action: str, resource: str
 ) -> list[Outcome] | None:
     matching = [rule for rule in module.rules if rule_matches(rule, actor, action, resource)]
-    variables = {
-        condition.variable
-        for rule in matching
-        for condition in rule.conditions
-        if condition.variable in index.enums
-    }
+    variables = set().union(*(guard_enums(rule.conditions, index) for rule in matching))
     assignments = worlds(index, variables)
     if assignments is None:
         return None
     return [
         Outcome(
             assignment,
-            [rule for rule in matching if all(condition_holds(c, assignment) for c in rule.conditions)],
+            [rule for rule in matching if all(condition_holds(c, assignment, index) for c in rule.conditions)],
         )
         for assignment in assignments
     ]
@@ -222,6 +245,7 @@ def check(module: Module) -> list[Finding]:
         check_permissions,
         check_machines,
         check_system,
+        check_assertions,
         check_enums,
         check_scenarios,
         check_joint_scenarios,
@@ -310,7 +334,7 @@ def check_formula(
             for value in formula.values:
                 if value not in index.enums[enum].values:
                     findings.append(Finding("UNDEFINED", f"{value} is not a value of {enum}", line))
-    elif isinstance(formula, Not):
+    elif isinstance(formula, (Not, Can)):
         check_formula(formula.operand, bound, index, line, findings)
     elif isinstance(formula, (And, Or)):
         for operand in formula.operands:
@@ -327,8 +351,8 @@ def check_formula(
 
 def check_invariants(module: Module, index: Index) -> list[Finding]:
     findings: list[Finding] = []
-    for invariant in module.invariants:
-        check_formula(invariant.formula, {}, index, invariant.line, findings)
+    for item in (*module.invariants, *module.premises, *module.assertions):
+        check_formula(item.formula, {}, index, item.line, findings)
     if findings:
         return findings
     enums = sorted(set().union(*(names for _, names in index.invariant_terms)))
@@ -344,8 +368,9 @@ def check_invariants(module: Module, index: Index) -> list[Finding]:
         assignment = dict(zip(enums, values))
         if all(evaluate(formula, assignment, {}, index) for formula, _ in index.invariant_terms):
             return findings
-    line = module.invariants[0].line if module.invariants else module.exclusions[0].line
-    return [Finding("CONTRADICTION", "the invariants and exclusions admit no combination of values", line)]
+    return [
+        Finding("CONTRADICTION", "the invariants, assumptions, and exclusions admit no combination of values", index.fact_line)
+    ]
 
 
 def check_views(module: Module, index: Index) -> list[Finding]:
@@ -384,16 +409,10 @@ def check_views(module: Module, index: Index) -> list[Finding]:
     return findings
 
 
-def check_condition(condition: Condition, index: Index, line: int) -> list[Finding]:
-    enum = index.enums.get(condition.variable)
-    if enum is None:
-        return [Finding("UNDEFINED", f"condition variable {condition.variable} is not an enum", line)]
-    given = condition.values if condition.operator == "in" else [condition.value]
-    return [
-        Finding("UNDEFINED", f"{value} is not a value of {condition.variable}", line)
-        for value in given
-        if value not in enum.values
-    ]
+def check_condition(condition: Formula, index: Index, line: int) -> list[Finding]:
+    findings: list[Finding] = []
+    check_formula(condition, {}, index, line, findings)
+    return findings
 
 
 def check_assumptions(assumes: list[str], index: Index, line: int, owner: str) -> list[Finding]:
@@ -547,12 +566,7 @@ def check_guards(
             elif len({transition_outcome(transition) for transition in group}) > 1:
                 findings.append(Finding("CONTRADICTION", f"{label} changes the counters in different ways", line))
             continue
-        variables = {
-            condition.variable
-            for item in (*group, *held)
-            for condition in item.conditions
-            if condition.variable in index.enums
-        }
+        variables = set().union(*(guard_enums(item.conditions, index) for item in (*group, *held)))
         assignments = worlds(index, variables)
         if assignments is None:
             findings.append(Finding("TOO_LARGE", f"{label} has too many guard combinations to enumerate", line))
@@ -560,8 +574,8 @@ def check_guards(
         conflicts = []
         gaps = []
         for assignment in assignments:
-            applicable = [t for t in group if all(condition_holds(c, assignment) for c in t.conditions)]
-            applicable_held = [h for h in held if all(condition_holds(c, assignment) for c in h.conditions)]
+            applicable = [t for t in group if all(condition_holds(c, assignment, index) for c in t.conditions)]
+            applicable_held = [h for h in held if all(condition_holds(c, assignment, index) for c in h.conditions)]
             if len({transition_outcome(t) for t in applicable}) > 1 or (applicable and applicable_held):
                 conflicts.append(assignment)
             elif not applicable and not applicable_held and (state, event) not in else_covered:
@@ -713,18 +727,18 @@ def check_system(module: Module, index: Index) -> list[Finding]:
     counters = [(machine.name, counter) for machine in machines for counter in machine.counters]
     interesting = {machine.name for machine in machines} | {counter for _, counter in counters}
     guarded = any(
-        condition.variable in interesting
+        guard_enums(transition.conditions, index) & interesting
         for machine in machines
         for transition in machine.transitions
-        for condition in transition.conditions
     )
-    watched = [formula for formula, enums in index.invariant_terms if enums and enums <= interesting]
+    watched = [formula for formula, enums in index.obligation_terms if enums and enums <= interesting]
     mixed = [
         (formula, enums)
-        for formula, enums in index.invariant_terms
+        for formula, enums in index.obligation_terms
         if enums & interesting and not enums <= interesting
     ]
-    if not machines or not (counters or guarded or watched or mixed):
+    pruning = [(formula, enums) for formula, enums in index.premise_terms if enums & interesting]
+    if not (machines and (counters or guarded or watched or mixed or pruning)) and not module.assertions:
         return []
     counter_order = [counter for _, counter in counters]
     limits = {counter: machine.counters[counter] for machine in machines for counter in machine.counters}
@@ -742,12 +756,8 @@ def check_system(module: Module, index: Index) -> list[Finding]:
     for machine in machines:
         for transition in machine.transitions:
             changed = {machine.name, *(counter for counter, _, _ in transition.effects)}
-            variables = {
-                condition.variable
-                for condition in transition.conditions
-                if condition.variable in index.enums and condition.variable not in interesting
-            }
-            for _, enums in mixed:
+            variables = guard_enums(transition.conditions, index) - interesting
+            for _, enums in (*mixed, *pruning):
                 if enums & changed:
                     variables |= enums - interesting
             key = frozenset(variables)
@@ -774,23 +784,26 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                 Finding(
                     "INVARIANT_VIOLATED",
                     f"no enum values satisfy the invariants at the start ({describe(start)})",
-                    module.invariants[0].line if module.invariants else module.exclusions[0].line,
+                    index.fact_line,
                 )
             )
             break
-
-    def describe_path(config: tuple) -> str:
-        path = []
-        while seen[config] is not None:
-            path.append(steps[config])
-            config = seen[config]
-        return " -> ".join(reversed(path)) or "the start"
+    for formula, enums in pruning:
+        scope = worlds(index, enums - interesting) if enums - interesting else [{}]
+        if scope is not None and not any(
+            agrees(world, start) and evaluate(formula, {**world, **start}, {}, index) for world in scope
+        ):
+            findings.append(
+                Finding("CONTRADICTION", f"the assumptions rule out the start ({describe(start)})", index.fact_line)
+            )
+            break
+    system = System(machines, counter_order, interesting, seen, steps, behind)
+    describe_path = system.path
 
     while queue:
         config = queue.popleft()
         states, values = config
-        assignment = {machine.name: state for machine, state in zip(machines, states)}
-        assignment.update({counter: str(value) for counter, value in zip(counter_order, values)})
+        assignment = system.assignment(config)
         for position, formula in enumerate(watched):
             if position not in violated and not evaluate(formula, assignment, {}, index):
                 violated.add(position)
@@ -810,9 +823,9 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                     world
                     for world in ({**scope, **assignment} for scope in scopes[id(transition)] if agrees(scope, assignment))
                     if all(
-                        condition_holds(condition, world)
+                        evaluate(condition, world, {}, index)
                         for condition in transition.conditions
-                        if condition.variable in world
+                        if free_enums(condition, index) <= world.keys()
                     )
                 ]
                 if not enabling:
@@ -845,9 +858,20 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                 new_states = list(states)
                 new_states[number] = transition.target
                 successor = (tuple(new_states), tuple(new_values))
-                behind.setdefault(successor, []).append(config)
                 after = {machine.name: transition.target}
                 after.update({counter: str(value) for counter, value in zip(counter_order, new_values)})
+                enabling = [
+                    world
+                    for world in enabling
+                    if all(
+                        evaluate(formula, {**world, **after}, {}, index)
+                        for formula, enums in pruning
+                        if enums <= world.keys()
+                    )
+                ]
+                if not enabling:
+                    continue
+                behind.setdefault(successor, []).append(config)
                 step = f"{machine.name}: {transition.event}"
                 for position, (formula, enums) in enumerate(mixed):
                     if position in broken:
@@ -908,6 +932,99 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                         machine.line,
                     )
                 )
+    index.system = system
+    return findings
+
+
+def outer_cans(formula: Formula) -> list[Can]:
+    if isinstance(formula, Can):
+        return [formula]
+    if isinstance(formula, Not):
+        return outer_cans(formula.operand)
+    if isinstance(formula, (And, Or)):
+        return [found for operand in formula.operands for found in outer_cans(operand)]
+    if isinstance(formula, Implies):
+        return outer_cans(formula.premise) + outer_cans(formula.conclusion)
+    if isinstance(formula, ForAll):
+        return outer_cans(formula.body)
+    return []
+
+
+def check_assertions(module: Module, index: Index) -> list[Finding]:
+    system = index.system
+    if not module.assertions:
+        return []
+    if system is None:
+        return [Finding("TOO_LARGE", "the assertions were not checked because the state space is too large", module.assertions[0].line)]
+    findings: list[Finding] = []
+    scopes: dict[int, list[dict[str, str]] | None] = {}
+    can_sets: dict[int, set[tuple]] = {}
+
+    def scope_of(formula: Formula) -> list[dict[str, str]] | None:
+        if id(formula) not in scopes:
+            variables = free_enums(formula, index) - system.interesting
+            scopes[id(formula)] = worlds(index, variables) if variables else [{}]
+        return scopes[id(formula)]
+
+    def ground(formula: Formula, config: tuple) -> Formula:
+        if isinstance(formula, Can):
+            return And([]) if config in can_set(formula) else Or([])
+        if isinstance(formula, Not):
+            return Not(ground(formula.operand, config))
+        if isinstance(formula, (And, Or)):
+            return type(formula)([ground(operand, config) for operand in formula.operands])
+        if isinstance(formula, Implies):
+            return Implies(ground(formula.premise, config), ground(formula.conclusion, config))
+        if isinstance(formula, ForAll):
+            return ForAll(formula.variable, formula.enum, ground(formula.body, config))
+        return formula
+
+    def states_of(formula: Formula, config: tuple) -> list[tuple[dict[str, str], bool]]:
+        grounded = ground(formula, config)
+        assignment = system.assignment(config)
+        return [
+            ({**world, **assignment}, evaluate(grounded, {**world, **assignment}, {}, index))
+            for world in scope_of(formula) or []
+            if agrees(world, assignment)
+        ]
+
+    def can_set(formula: Can) -> set[tuple]:
+        if id(formula) not in can_sets:
+            found = {config for config in system.seen if any(holds for _, holds in states_of(formula.operand, config))}
+            queue = deque(found)
+            while queue:
+                for previous in system.behind.get(queue.popleft(), ()):
+                    if previous not in found:
+                        found.add(previous)
+                        queue.append(previous)
+            can_sets[id(formula)] = found
+        return can_sets[id(formula)]
+
+    def unscoped(formula: Formula) -> bool:
+        return scope_of(formula) is None or any(unscoped(inner.operand) for inner in outer_cans(formula))
+
+    for assertion in module.assertions:
+        label = f"assertion {assertion.name}"
+        if unscoped(assertion.formula):
+            findings.append(Finding("TOO_LARGE", f"{label} has too many enum combinations to enumerate", assertion.line))
+            continue
+        if assertion.mode == "reachable":
+            if not any(holds for config in system.seen for _, holds in states_of(assertion.formula, config)):
+                findings.append(Finding("ASSERTION_FAILED", f"{label} holds in no reachable state", assertion.line))
+            continue
+        failure = next(
+            (
+                (config, state)
+                for config in system.seen
+                for state, holds in states_of(assertion.formula, config)
+                if not holds
+            ),
+            None,
+        )
+        if failure is not None:
+            config, state = failure
+            where = "at the start" if system.seen[config] is None else f"after: {system.path(config)}"
+            findings.append(Finding("ASSERTION_FAILED", f"{label} fails {where} ({describe(state)})", assertion.line))
     return findings
 
 
@@ -918,11 +1035,13 @@ def check_machines(module: Module, index: Index) -> list[Finding]:
     return findings
 
 
-def scenario_step(machine: Machine, state: str, event: str, world: dict[str, str]) -> tuple[str, Transition | None]:
+def scenario_step(
+    machine: Machine, state: str, event: str, world: dict[str, str], index: Index
+) -> tuple[str, Transition | None]:
     applicable = [
         t
         for t in machine.transitions
-        if t.source == state and t.event == event and all(condition_holds(c, world) for c in t.conditions)
+        if t.source == state and t.event == event and all(condition_holds(c, world, index) for c in t.conditions)
     ]
     if applicable:
         return "moved", applicable[0]
@@ -930,7 +1049,7 @@ def scenario_step(machine: Machine, state: str, event: str, world: dict[str, str
         h.kind == "ignore"
         and h.event == event
         and h.state in (state, "*")
-        and all(condition_holds(c, world) for c in h.conditions)
+        and all(condition_holds(c, world, index) for c in h.conditions)
         for h in machine.handlings
     )
     return ("ignored" if ignored else "refused"), None
@@ -968,7 +1087,7 @@ def check_joint_scenarios(module: Module, index: Index) -> list[Finding]:
         for machine_name, event in scenario.events:
             machine = index.machines[machine_name]
             world = {**states, **{counter: str(value) for counter, value in counters.items()}}
-            outcome, transition = scenario_step(machine, states[machine_name], event, world)
+            outcome, transition = scenario_step(machine, states[machine_name], event, world, index)
             if transition is not None:
                 states[machine_name] = transition.target
                 apply_effects(transition, counters)
@@ -996,29 +1115,46 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
         if machine is None:
             findings.append(Finding("UNDEFINED", f"machine {scenario.machine} is not defined", scenario.line))
             continue
-        given = {c.variable: c.value for c in scenario.given if c.operator == "="}
-        counters = {counter: 0 for counter in machine.counters}
-        state = scenario.start
-        failed = False
-        for event in scenario.events:
-            world = {**given, **{counter: str(value) for counter, value in counters.items()}}
-            outcome, transition = scenario_step(machine, state, event, world)
-            if transition is not None:
-                state = transition.target
-                apply_effects(transition, counters)
-            elif outcome == "ignored":
-                continue
-            else:
-                findings.append(
-                    Finding("SCENARIO_FAILED", f"scenario {scenario.name}: {event} is not accepted in {state}", scenario.line)
-                )
-                failed = True
+        problems = [finding for condition in scenario.given for finding in check_condition(condition, index, scenario.line)]
+        if problems:
+            findings.extend(problems)
+            continue
+        names = sorted(guard_enums(scenario.given, index))
+        domains = [index.enums[name].values for name in names]
+        size = 1
+        for domain in domains:
+            size *= len(domain)
+        if size > ENUMERATION_LIMIT:
+            findings.append(Finding("TOO_LARGE", f"scenario {scenario.name} has too many given combinations to enumerate", scenario.line))
+            continue
+        givens = [
+            given
+            for given in (dict(zip(names, values)) for values in product(*domains))
+            if all(evaluate(condition, given, {}, index) for condition in scenario.given)
+        ]
+        if not givens:
+            findings.append(Finding("SCENARIO_FAILED", f"scenario {scenario.name} is given values that no combination satisfies", scenario.line))
+        for given in givens:
+            failure = replay(machine, scenario, given, index)
+            if failure:
+                where = f" when {describe(given)}" if len(givens) > 1 else ""
+                findings.append(Finding("SCENARIO_FAILED", f"scenario {scenario.name}{failure}{where}", scenario.line))
                 break
-        if not failed and state != scenario.expect:
-            findings.append(
-                Finding("SCENARIO_FAILED", f"scenario {scenario.name} ends in {state} instead of {scenario.expect}", scenario.line)
-            )
     return findings
+
+
+def replay(machine: Machine, scenario: Scenario, given: dict[str, str], index: Index) -> str:
+    counters = {counter: 0 for counter in machine.counters}
+    state = scenario.start
+    for event in scenario.events:
+        world = {**given, **{counter: str(value) for counter, value in counters.items()}}
+        outcome, transition = scenario_step(machine, state, event, world, index)
+        if transition is not None:
+            state = transition.target
+            apply_effects(transition, counters)
+        elif outcome != "ignored":
+            return f": {event} is not accepted in {state}"
+    return "" if state == scenario.expect else f" ends in {state} instead of {scenario.expect}"
 
 
 def term_type(term: Term, index: Index, line: int, findings: list[Finding]) -> str | None:

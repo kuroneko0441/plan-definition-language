@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from itertools import product
 
+from .ground import expand
 from .model import (
     And,
     Atom,
@@ -55,15 +56,17 @@ class Outcome:
 class System:
     machines: list[Machine]
     counter_order: list[str]
+    rigid: list[str]
     interesting: set[str]
     seen: dict[tuple, tuple | None]
     steps: dict[tuple, str]
     behind: dict[tuple, list[tuple]]
 
     def assignment(self, config: tuple) -> dict[str, str]:
-        states, values = config
+        states, values, fixed = config
         result = {machine.name: state for machine, state in zip(self.machines, states)}
         result.update({counter: str(value) for counter, value in zip(self.counter_order, values)})
+        result.update(zip(self.rigid, fixed))
         return result
 
     def path(self, config: tuple) -> str:
@@ -71,13 +74,16 @@ class System:
         while self.seen[config] is not None:
             path.append(self.steps[config])
             config = self.seen[config]
-        return " -> ".join(reversed(path)) or "the start"
+        route = " -> ".join(reversed(path)) or "the start"
+        return f"{route} with {describe(dict(zip(self.rigid, config[2])))}" if self.rigid else route
 
 
 class Index:
     def __init__(self, module: Module):
         self.enums = {}
         for definition in module.enums:
+            self.enums.setdefault(definition.name, definition)
+        for definition in module.variables:
             self.enums.setdefault(definition.name, definition)
         self.entities = {}
         for definition in module.entities:
@@ -233,8 +239,9 @@ def triple_outcomes(
 
 
 def check(module: Module) -> list[Finding]:
+    module, problems = expand(module)
     index = Index(module)
-    findings: list[Finding] = []
+    findings = [Finding(kind, message, line) for kind, message, line in problems]
     for step in (
         check_definitions,
         check_entities,
@@ -725,27 +732,31 @@ def check_enums(module: Module, index: Index) -> list[Finding]:
 def check_system(module: Module, index: Index) -> list[Finding]:
     machines = [machine for machine in module.machines if machine.initial in machine.states]
     counters = [(machine.name, counter) for machine in machines for counter in machine.counters]
-    interesting = {machine.name for machine in machines} | {counter for _, counter in counters}
+    rigid = [name for name in module.rigid if name in index.enums]
+    interesting = {machine.name for machine in machines} | {counter for _, counter in counters} | set(rigid)
     guarded = any(
         guard_enums(transition.conditions, index) & interesting
         for machine in machines
         for transition in machine.transitions
     )
-    watched = [formula for formula, enums in index.obligation_terms if enums and enums <= interesting]
+    settled = [formula for formula, enums in index.obligation_terms if enums and enums <= set(rigid)]
+    watched = [
+        formula
+        for formula, enums in index.obligation_terms
+        if enums and enums <= interesting and not enums <= set(rigid)
+    ]
     mixed = [
         (formula, enums)
         for formula, enums in index.obligation_terms
         if enums & interesting and not enums <= interesting
     ]
     pruning = [(formula, enums) for formula, enums in index.premise_terms if enums & interesting]
-    if not (machines and (counters or guarded or watched or mixed or pruning)) and not module.assertions:
+    if not (machines and (counters or guarded or watched or mixed or pruning or rigid)) and not module.assertions:
         return []
     counter_order = [counter for _, counter in counters]
     limits = {counter: machine.counters[counter] for machine in machines for counter in machine.counters}
-    initial = (tuple(machine.initial for machine in machines), tuple(0 for _ in counter_order))
-    seen: dict[tuple, tuple | None] = {initial: None}
+    seen: dict[tuple, tuple | None] = {}
     steps: dict[tuple, str] = {}
-    queue = deque([initial])
     findings: list[Finding] = []
     reported_overflow: set[tuple[str, int]] = set()
     violated: set[int] = set()
@@ -775,34 +786,48 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                 )
                 scope = [{}]
             scopes[id(transition)] = scope
-    start = {machine.name: machine.initial for machine in machines}
-    start.update({counter: "0" for counter in counter_order})
-    for _, enums in mixed:
-        scope = worlds(index, enums - interesting)
-        if scope is not None and not any(agrees(world, start) for world in scope):
-            findings.append(
-                Finding(
-                    "INVARIANT_VIOLATED",
-                    f"no enum values satisfy the invariants at the start ({describe(start)})",
-                    index.fact_line,
-                )
-            )
-            break
-    for formula, enums in pruning:
-        scope = worlds(index, enums - interesting) if enums - interesting else [{}]
-        if scope is not None and not any(
-            agrees(world, start) and evaluate(formula, {**world, **start}, {}, index) for world in scope
-        ):
-            findings.append(
-                Finding("CONTRADICTION", f"the assumptions rule out the start ({describe(start)})", index.fact_line)
-            )
-            break
-    system = System(machines, counter_order, interesting, seen, steps, behind)
+    system = System(machines, counter_order, rigid, interesting, seen, steps, behind)
     describe_path = system.path
+
+    def start_problem(start: dict[str, str]) -> Finding | None:
+        for _, enums in mixed:
+            scope = worlds(index, enums - interesting)
+            if scope is not None and not any(agrees(world, start) for world in scope):
+                message = f"no enum values satisfy the invariants at the start ({describe(start)})"
+                return Finding("INVARIANT_VIOLATED", message, index.fact_line)
+        for formula, enums in pruning:
+            scope = worlds(index, enums - interesting) if enums - interesting else [{}]
+            if scope is not None and not any(
+                agrees(world, start) and evaluate(formula, {**world, **start}, {}, index) for world in scope
+            ):
+                return Finding("CONTRADICTION", f"the assumptions rule out the start ({describe(start)})", index.fact_line)
+        return None
+
+    domains = [index.enums[name].values for name in rigid]
+    size = 1
+    for domain in domains:
+        size *= len(domain)
+    if size > SYSTEM_LIMIT:
+        return findings + [Finding("TOO_LARGE", "the fixed fields have too many combinations to explore", 0)]
+    problems = []
+    for fixed in product(*domains):
+        initial = (tuple(machine.initial for machine in machines), tuple(0 for _ in counter_order), fixed)
+        start = system.assignment(initial)
+        if not all(evaluate(formula, start, {}, index) for formula in settled):
+            continue
+        problem = start_problem(start)
+        if problem is None:
+            seen[initial] = None
+        else:
+            problems.append(problem)
+    if not seen:
+        message = "no values of the fixed fields satisfy the invariants"
+        findings.append(problems[0] if problems else Finding("CONTRADICTION", message, index.fact_line))
+    queue = deque(seen)
 
     while queue:
         config = queue.popleft()
-        states, values = config
+        states, values, fixed = config
         assignment = system.assignment(config)
         for position, formula in enumerate(watched):
             if position not in violated and not evaluate(formula, assignment, {}, index):
@@ -857,7 +882,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                     continue
                 new_states = list(states)
                 new_states[number] = transition.target
-                successor = (tuple(new_states), tuple(new_values))
+                successor = (tuple(new_states), tuple(new_values), fixed)
                 after = {machine.name: transition.target}
                 after.update({counter: str(value) for counter, value in zip(counter_order, new_values)})
                 enabling = [
@@ -897,6 +922,8 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                     if len(seen) > SYSTEM_LIMIT:
                         return findings + [Finding("TOO_LARGE", "the combined state space is too large to explore", 0)]
     for number, machine in enumerate(machines):
+        if machine.replica:
+            continue
         forward: dict[str, set[str]] = {}
         backward: dict[str, set[str]] = {}
         for transition in machine.transitions:
@@ -1031,7 +1058,8 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
 def check_machines(module: Module, index: Index) -> list[Finding]:
     findings = []
     for machine in module.machines:
-        findings.extend(check_machine(machine, index))
+        if not machine.replica:
+            findings.extend(check_machine(machine, index))
     return findings
 
 

@@ -1,6 +1,6 @@
 """Deterministic sentences for rules, built from labels and Korean particle rules."""
 
-from .model import And, Atom, Can, ForAll, Formula, Implies, InSet, Module, Not, Or, Rule
+from .model import And, Atom, Can, Exists, ForAll, Formula, Implies, InSet, Module, Not, Or, Rule
 
 HANGUL_FIRST = 0xAC00
 HANGUL_LAST = 0xD7A3
@@ -85,8 +85,9 @@ def formula_text(formula: Formula, parent: int = 0) -> str:
         return f"¬({formula_text(formula.operand)})"
     if isinstance(formula, Can):
         return f"can ({formula_text(formula.operand)})"
-    if isinstance(formula, ForAll):
-        text = f"∀ {formula.variable} ∈ {formula.enum} : {formula_text(formula.body)}"
+    if isinstance(formula, (ForAll, Exists)):
+        symbol = "∀" if isinstance(formula, ForAll) else "∃"
+        text = f"{symbol} {formula.variable} ∈ {formula.enum} : {formula_text(formula.body)}"
         return f"({text})" if parent else text
     level = PRECEDENCE[type(formula)]
     if isinstance(formula, Implies):

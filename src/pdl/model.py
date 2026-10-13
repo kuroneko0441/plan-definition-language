@@ -26,6 +26,7 @@ class EntityDefinition:
     label: str = ""
     field_notes: dict[str, str] = field(default_factory=dict)
     field_labels: dict[str, str] = field(default_factory=dict)
+    fixed: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -136,6 +137,8 @@ class Machine:
     why: str = ""
     counters: dict[str, int] = field(default_factory=dict)
     counter_labels: dict[str, str] = field(default_factory=dict)
+    entity: str = ""
+    replica: bool = False
 
 
 @dataclass
@@ -234,11 +237,18 @@ class ForAll:
 
 
 @dataclass
+class Exists:
+    variable: str
+    enum: str
+    body: "Formula"
+
+
+@dataclass
 class Can:
     operand: "Formula"
 
 
-Formula = Union[Atom, InSet, Not, And, Or, Implies, ForAll, Can]
+Formula = Union[Atom, InSet, Not, And, Or, Implies, ForAll, Exists, Can]
 
 
 @dataclass
@@ -288,3 +298,7 @@ class Module:
     joint_scenarios: list[JointScenario] = field(default_factory=list)
     unknowns: list[Unknown] = field(default_factory=list)
     laws: list[Law] = field(default_factory=list)
+    scopes: dict[str, int] = field(default_factory=dict)
+    scope_lines: dict[str, int] = field(default_factory=dict)
+    variables: list[EnumDefinition] = field(default_factory=list)
+    rigid: list[str] = field(default_factory=list)

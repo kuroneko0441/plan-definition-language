@@ -15,6 +15,7 @@ from .model import (
     EntityDefinition,
     EnumDefinition,
     Exclusion,
+    Exists,
     ForAll,
     Formula,
     Handling,
@@ -42,11 +43,11 @@ TOKEN_PATTERN = re.compile(
     r"(?P<space>\s+)"
     r"|(?P<comment>#[^\n]*)"
     r"|(?P<string>\"(?:[^\"\\]|\\.)*\")"
-    r"|(?P<symbol>->|→|<=|>=|≤|≥|=>|⇒|!=|≠|∧|∨|¬|∀|∈|[{}(),:=|*<>.;?+])"
+    r"|(?P<symbol>->|→|<=|>=|≤|≥|=>|⇒|!=|≠|∧|∨|¬|∀|∃|∈|[{}(),:=|*<>.;?+])"
     r"|(?P<word>\w+)"
 )
 SYMBOL_ALIASES = {"→": "->", "≤": "<=", "≥": ">=", "⇒": "=>", "≠": "!="}
-WORD_ALIASES = {"∧": "and", "∨": "or", "¬": "not", "∀": "forall", "∈": "in"}
+WORD_ALIASES = {"∧": "and", "∨": "or", "¬": "not", "∀": "forall", "∃": "exists", "∈": "in"}
 COMPARISON_OPERATORS = ("=", "<", ">", "<=", ">=")
 
 
@@ -206,6 +207,7 @@ class Parser:
             "invariant": self.invariant,
             "assume": self.premise,
             "assert": self.assertion,
+            "scope": self.scope,
             "machine": self.machine,
             "scenario": self.scenario,
             "unknown": self.unknown,
@@ -265,6 +267,7 @@ class Parser:
         fields: list[tuple[str, str]] = []
         field_notes: dict[str, str] = {}
         field_labels: dict[str, str] = {}
+        fixed: list[str] = []
         if self.accept("{"):
             while not self.accept("}"):
                 field_name = self.word()
@@ -273,13 +276,15 @@ class Parser:
                 field_label = self.label()
                 if field_label:
                     field_labels[field_name] = field_label
+                if self.accept("fixed"):
+                    fixed.append(field_name)
                 note = self.why()
                 if note:
                     field_notes[field_name] = note
                 self.accept(",")
         module.entities.append(
             EntityDefinition(
-                line, name, key, passive, fields, self.why(), label, field_notes, field_labels
+                line, name, key, passive, fields, self.why(), label, field_notes, field_labels, fixed
             )
         )
         module.definitions.append(("entity", name, line))
@@ -410,17 +415,18 @@ class Parser:
             return Can(self.unary())
         if token is not None and token.kind == "word" and token.value == "can":
             raise PdlSyntaxError(token.line, "can is allowed only inside assert")
-        if self.accept("forall"):
-            variable = self.word()
-            self.expect("in")
-            enum = self.word()
-            self.expect(":")
-            return ForAll(variable, enum, self.implication())
+        for keyword, quantifier in (("forall", ForAll), ("exists", Exists)):
+            if self.accept(keyword):
+                variable = self.word()
+                self.expect("in")
+                domain = self.word()
+                self.expect(":")
+                return quantifier(variable, domain, self.implication())
         if self.accept("("):
             formula = self.implication()
             self.expect(")")
             return formula
-        left = self.word()
+        left = self.path()
         if self.accept("in"):
             self.expect("{")
             values = self.comma_words()
@@ -428,12 +434,29 @@ class Parser:
             return InSet(left, values)
         token = self.advance()
         if token.kind == "string" or token.value not in ("=", "!="):
-            raise PdlSyntaxError(token.line, f"expected = or != but found {token.value!r}")
-        return Atom(left, token.value, self.word())
+            raise PdlSyntaxError(token.line, f"expected =, != or in but found {token.value!r}")
+        return Atom(left, token.value, self.path())
+
+    def path(self) -> str:
+        names = [self.word()]
+        while self.accept("."):
+            names.append(self.word())
+        return ".".join(names)
+
+    def scope(self, module: Module) -> None:
+        line = self.expect("scope").line
+        name = self.word()
+        count = self.word()
+        if not count.isdigit():
+            raise PdlSyntaxError(line, f"expected a number of instances but found {count!r}")
+        module.scopes[name] = int(count)
+        module.scope_lines[name] = line
 
     def machine(self, module: Module) -> None:
         line = self.expect("machine").line
         machine = Machine(line, self.word())
+        if self.accept("of"):
+            machine.entity = self.word()
         machine.label = self.label()
         machine.why = self.why()
         self.expect("{")

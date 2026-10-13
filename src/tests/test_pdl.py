@@ -845,6 +845,101 @@ class AssertionTest(unittest.TestCase):
         self.assertIn("- live: `always P = Ok ⇒ can (T = Done)`", document)
 
 
+SHOP = (
+    "module m\nexternal Sys\nenum Grade = Gold | Basic\n"
+    "entity Dealer key (id) passive { id: Text\ngrade: Grade fixed }\n"
+    "entity Order key (id) passive { id: Text\ndealer: Dealer fixed\nbackup: Dealer? }\n"
+    "scope Dealer 2\nscope Order 2\n"
+    "machine Flow of Order { states Open, Done\ninitial Open\nterminal Done\nevent Finish\n"
+    "Open -> Done on Finish when this.dealer.grade = Gold by Sys\n"
+    "reject Open on Finish\nreject Done on Finish }\n"
+)
+GOLD_ONLY = "assume all_gold: forall d in Dealer: d.grade = Gold\n"
+
+
+class RelationTest(unittest.TestCase):
+    def failures(self, text: str) -> list[str]:
+        return [f.message for f in check(parse_module(text)) if f.kind == "ASSERTION_FAILED"]
+
+    def test_each_instance_runs_its_own_machine(self):
+        text = SHOP + GOLD_ONLY + "assert apart: reachable Order1.Flow = Done and Order2.Flow = Open\n"
+        self.assertEqual(blocking_kinds(text), Counter())
+
+    def test_a_fixed_field_that_blocks_an_instance_is_a_trap(self):
+        findings = [f for f in check(parse_module(SHOP)) if f.blocking]
+        self.assertEqual([f.kind for f in findings], ["TRAP"])
+        self.assertIn("state Open of Order1.Flow cannot reach a terminal state", findings[0].message)
+        self.assertIn("Dealer1.grade=Basic", findings[0].message)
+
+    def test_a_path_reads_through_a_reference(self):
+        holds = SHOP + GOLD_ONLY + "assert a: always forall o in Order: o.Flow = Done => o.dealer.grade = Gold\n"
+        self.assertEqual(self.failures(holds), [])
+        fails = SHOP + GOLD_ONLY + "assert a: always forall o in Order: o.dealer = Dealer1\n"
+        self.assertEqual(len(self.failures(fails)), 1)
+
+    def test_a_field_that_is_not_fixed_changes_between_transitions(self):
+        text = SHOP.replace("grade: Grade fixed", "grade: Grade")
+        text += "assert a: always forall o in Order: o.Flow = Done => o.dealer.grade = Gold\n"
+        self.assertEqual(len(self.failures(text)), 1)
+
+    def test_a_guard_reads_the_other_instances(self):
+        guard = "when this.dealer.grade = Gold"
+        alone = guard + " and forall p in Order: p = this or p.dealer != this.dealer or p.Flow = Open"
+        one = "assert one: always forall a in Order: forall b in Order: a = b or a.dealer != b.dealer or a.Flow = Open or b.Flow = Open\n"
+        self.assertEqual(len(self.failures(SHOP + GOLD_ONLY + one)), 1)
+        self.assertEqual(self.failures(SHOP.replace(guard, alone) + GOLD_ONLY + one), [])
+
+    def test_exists_needs_one_instance(self):
+        text = SHOP + GOLD_ONLY + "assert some_open: always exists o in Order: o.Flow = Open\n"
+        failures = self.failures(text)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("Order1.Flow=Done", failures[0])
+        self.assertIn("Order2.Flow=Done", failures[0])
+
+    def test_an_optional_field_can_be_missing(self):
+        text = SHOP + GOLD_ONLY + "assert a: reachable Order1.backup = none\nassert b: always Order1.backup.grade = Gold\n"
+        failures = self.failures(text)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("assertion b", failures[0])
+
+    def test_a_rule_reads_the_instance_it_applies_to(self):
+        base = SHOP.replace("passive { id: Text\ndealer", "{ id: Text\ndealer") + "actor Clerk\naction Edit\n"
+        covered = base + "permit Clerk Edit Order when this.Flow = Open\nforbid Clerk Edit Order when this.Flow = Done\n"
+        self.assertEqual(blocking_kinds(covered + GOLD_ONLY), Counter())
+        gap = base + "permit Clerk Edit Order when this.Flow = Open\n"
+        self.assertEqual(blocking_kinds(gap + GOLD_ONLY), Counter({"UNCOVERED": 1}))
+
+    def test_a_scenario_replays_the_first_instance(self):
+        text = SHOP + GOLD_ONLY + "scenario s on Flow { start Open given this.dealer.grade = Gold events Finish expect Done }\n"
+        self.assertEqual(blocking_kinds(text), Counter())
+
+    def test_relational_errors_are_reported(self):
+        for formula, part in (
+            ("forall o in Order: o.missing = Gold", "no field, machine, or counter named missing"),
+            ("forall o in Order: o.id = Gold", "which a formula cannot read"),
+            ("forall o in Order: o.dealer = Gold", "Gold is not a value of"),
+            ("stranger.grade = Gold", "not a bound variable"),
+            ("forall o in Order: o.dealer.grade.more = Gold", "not an entity instance"),
+        ):
+            messages = [f.message for f in check(parse_module(SHOP + GOLD_ONLY + f"assert a: always {formula}\n")) if f.kind == "UNDEFINED"]
+            self.assertEqual(len(messages), 1, formula)
+            self.assertIn(part, messages[0])
+
+    def test_a_scope_names_a_defined_entity_within_the_limit(self):
+        self.assertEqual(blocking_kinds("module m\nscope Ghost 2\n"), Counter({"UNDEFINED": 1}))
+        self.assertEqual(blocking_kinds("module m\nentity E passive\nscope E 9\n"), Counter({"TOO_LARGE": 1}))
+        unscoped = SHOP.replace("scope Order 2\n", "")
+        self.assertIn("UNDEFINED", blocking_kinds(unscoped))
+
+    def test_the_instance_machine_and_the_quantifier_are_rendered(self):
+        module = parse_module(SHOP + GOLD_ONLY + "assert a: always exists o in Order: o.Flow = Open\n")
+        document = render(module, check(module), "en")
+        self.assertIn("- One flow for each: Order", document)
+        self.assertIn("In Open when this.dealer.grade is Gold, Finish moves to Done.", document)
+        self.assertIn("dealer: Dealer [fixed]", document)
+        self.assertIn("- a: `always ∃ o ∈ Order : o.Flow = Open`", document)
+
+
 class ConsistencyTest(unittest.TestCase):
     def kinds(self, *texts: str) -> Counter:
         modules = [(Path(f"m{number}.pdl"), parse_module(text)) for number, text in enumerate(texts)]

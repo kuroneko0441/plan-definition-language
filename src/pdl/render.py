@@ -3,6 +3,7 @@
 from itertools import product
 
 from .checks import Finding, Index, guard_enums, row_entities, rule_matches, triple_outcomes
+from .ground import expand
 from .model import (
     Machine,
     Module,
@@ -31,6 +32,8 @@ LABELS = {
         "terms": "용어",
         "cyclic": "끝나지 않고 처음 상태로 돌아가며 반복되는 흐름",
         "counter": "카운터",
+        "instance": "건마다 따로 진행되는 대상",
+        "fixed": "변하지 않음",
         "after": "제한 시간",
         "stored": "저장값",
         "basic_types": "기본 자료형은 Text(글자), Int(정수), Decimal(소수), Money(금액), Bool(참 또는 거짓), Timestamp(시각), Duration(기간), Day(일), Week(주), Month(월)이다. 시간 값은 next(다음), before(이전), month_of(일이 속한 월)로 계산하고, 자료형 뒤의 물음표는 비어 있을 수 있음을, list는 여러 개를 뜻한다.",
@@ -92,6 +95,8 @@ LABELS = {
         "terms": "Terms",
         "cyclic": "A flow that never ends and returns to the initial state",
         "counter": "Counter",
+        "instance": "One flow for each",
+        "fixed": "fixed",
         "after": "time limit",
         "stored": "Stored text",
         "basic_types": "Basic types are Text, Int, Decimal, Money, Bool, Timestamp, Duration, Day, Week, and Month.",
@@ -326,6 +331,8 @@ def render_machines(
             )
         if machine.cyclic:
             lines.append(f"- {labels['cyclic']}")
+        if machine.entity:
+            lines.append(f"- {labels['instance']}: {names.show(machine.entity)}")
         for counter, maximum in machine.counters.items():
             shown = machine.counter_labels.get(counter) if language == "ko" else None
             lines.append(f"- {labels['counter']}: {shown or counter} (0 ~ {maximum})")
@@ -423,7 +430,8 @@ def render_machines(
 
 def render(module: Module, findings: list[Finding], language: str = "ko", draft: bool = False) -> str:
     labels = LABELS[language]
-    index = Index(module)
+    expanded, _ = expand(module)
+    index = Index(expanded)
     names = Names(module, language)
 
     def titled(name: str) -> str:
@@ -509,6 +517,7 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
                     "<br>".join(
                         (f"{n} ({e.field_labels[n]})" if n in e.field_labels else n)
                         + f": {t}"
+                        + (f" [{labels['fixed']}]" if n in e.fixed else "")
                         + (f" - {e.field_notes[n]}" if n in e.field_notes else "")
                         for n, t in e.fields
                     ),
@@ -517,7 +526,7 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
                 for e in described
             ],
         )
-    appendix += render_permissions(module, index, labels, names, language, summary=True)
+    appendix += render_permissions(expanded, index, labels, names, language, summary=True)
     if appendix:
         lines += [f"## {labels['appendix']}", "", labels["appendix_note"], labels["basic_types"], ""] + appendix
     return "\n".join(dedupe_rationales(lines, labels)).rstrip() + "\n"

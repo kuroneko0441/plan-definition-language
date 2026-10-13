@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Compiler that finds holes in plan definitions and renders hole-free modules."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["z3-solver==4.16.0.0"]
 
 [project.scripts]
 pdl = "pdl.cli:main"

@@ -10,6 +10,7 @@ from .model import (
     Atom,
     Call,
     Can,
+    Constant,
     Declaration,
     Derivation,
     EntityDefinition,
@@ -208,6 +209,7 @@ class Parser:
             "assume": self.premise,
             "assert": self.assertion,
             "scope": self.scope,
+            "const": self.constant,
             "machine": self.machine,
             "scenario": self.scenario,
             "unknown": self.unknown,
@@ -433,8 +435,8 @@ class Parser:
             self.expect("}")
             return InSet(left, values)
         token = self.advance()
-        if token.kind == "string" or token.value not in ("=", "!="):
-            raise PdlSyntaxError(token.line, f"expected =, != or in but found {token.value!r}")
+        if token.kind == "string" or token.value not in ("=", "!=", *COMPARISON_OPERATORS):
+            raise PdlSyntaxError(token.line, f"expected a comparison or in but found {token.value!r}")
         return Atom(left, token.value, self.path())
 
     def path(self) -> str:
@@ -442,6 +444,27 @@ class Parser:
         while self.accept("."):
             names.append(self.word())
         return ".".join(names)
+
+    def number(self) -> int:
+        token = self.advance()
+        if token.kind != "word" or not token.value.isdigit():
+            raise PdlSyntaxError(token.line, f"expected a number but found {token.value!r}")
+        return int(token.value)
+
+    def constant(self, module: Module) -> None:
+        line = self.expect("const").line
+        name = self.word()
+        self.expect("in")
+        low = self.number()
+        self.expect(".")
+        self.expect(".")
+        high = self.number()
+        if low > high:
+            raise PdlSyntaxError(line, f"the range of {name} is empty")
+        label = self.label()
+        assumes = self.assumptions()
+        module.constants.append(Constant(line, name, low, high, label, self.why(), assumes))
+        module.definitions.append(("const", name, line))
 
     def scope(self, module: Module) -> None:
         line = self.expect("scope").line
@@ -490,7 +513,10 @@ class Parser:
                 counter = self.word()
                 counter_label = self.string() if self.peek() is not None and self.peek().kind == "string" else ""
                 self.expect("max")
-                machine.counters[counter] = int(self.word())
+                maximum = self.word()
+                machine.counters[counter] = int(maximum) if maximum.isdigit() else 0
+                if not maximum.isdigit():
+                    machine.counter_bounds[counter] = maximum
                 if counter_label:
                     machine.counter_labels[counter] = counter_label
                 module.definitions.append(("counter", counter, token.line))

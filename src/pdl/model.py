@@ -139,6 +139,7 @@ class Machine:
     counter_labels: dict[str, str] = field(default_factory=dict)
     entity: str = ""
     replica: bool = False
+    counter_bounds: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -260,6 +261,17 @@ class Invariant:
 
 
 @dataclass
+class Constant:
+    line: int
+    name: str
+    low: int
+    high: int
+    label: str = ""
+    why: str = ""
+    assumes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Premise:
     line: int
     name: str
@@ -298,6 +310,7 @@ class Module:
     joint_scenarios: list[JointScenario] = field(default_factory=list)
     unknowns: list[Unknown] = field(default_factory=list)
     laws: list[Law] = field(default_factory=list)
+    constants: list[Constant] = field(default_factory=list)
     scopes: dict[str, int] = field(default_factory=dict)
     scope_lines: dict[str, int] = field(default_factory=dict)
     variables: list[EnumDefinition] = field(default_factory=list)

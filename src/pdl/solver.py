@@ -1,0 +1,281 @@
+"""Z3 queries that replace enumeration when a check is too large to enumerate."""
+
+import operator
+from dataclasses import dataclass
+
+import z3
+from z3 import z3util
+
+from .model import And, Atom, Call, ForAll, Formula, Implies, InSet, Law, Not, Or, Reference, Term
+
+ORDERINGS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
+Environment = dict[str, z3.ArithRef]
+
+
+class Encoder:
+    def __init__(self, enums: dict[str, list[str]]):
+        self.enums = enums
+
+    def domain(self, name: str, variable: z3.ArithRef) -> z3.BoolRef:
+        return z3.And(variable >= 0, variable < len(self.enums[name]))
+
+    def side(self, term: str, environment: Environment, bound: dict[str, str]) -> tuple[bool, str]:
+        if term in bound:
+            return False, bound[term]
+        return term in environment, term
+
+    def number(self, variable: bool, text: str, environment: Environment) -> z3.ArithRef | None:
+        if not variable:
+            return z3.IntVal(int(text)) if text.isdigit() else None
+        values = self.enums[text]
+        if not all(value.isdigit() for value in values):
+            return None
+        return z3.Sum([z3.If(environment[text] == position, int(value), 0) for position, value in enumerate(values)])
+
+    def equal(self, left: tuple[bool, str], right: tuple[bool, str], environment: Environment) -> z3.BoolRef:
+        if not left[0] and right[0]:
+            left, right = right, left
+        if not left[0]:
+            return z3.BoolVal(left[1] == right[1])
+        values = self.enums[left[1]]
+        if not right[0]:
+            return environment[left[1]] == values.index(right[1]) if right[1] in values else z3.BoolVal(False)
+        return z3.Or(
+            [
+                z3.And(environment[left[1]] == position, environment[right[1]] == other)
+                for position, value in enumerate(values)
+                for other, candidate in enumerate(self.enums[right[1]])
+                if value == candidate
+            ]
+        )
+
+    def encode(self, formula: Formula, environment: Environment, bound: dict[str, str] | None = None) -> z3.BoolRef:
+        bound = bound or {}
+        if isinstance(formula, Atom):
+            left = self.side(formula.left, environment, bound)
+            right = self.side(formula.right, environment, bound)
+            if formula.operator in ORDERINGS:
+                numbers = [self.number(*left, environment), self.number(*right, environment)]
+                if None in numbers:
+                    return z3.BoolVal(False)
+                return ORDERINGS[formula.operator](*numbers)
+            same = self.equal(left, right, environment)
+            return same if formula.operator == "=" else z3.Not(same)
+        if isinstance(formula, InSet):
+            variable, text = self.side(formula.left, environment, bound)
+            if not variable:
+                return z3.BoolVal(text in formula.values)
+            values = self.enums[text]
+            return z3.Or([environment[text] == values.index(value) for value in formula.values if value in values])
+        if isinstance(formula, Not):
+            return z3.Not(self.encode(formula.operand, environment, bound))
+        if isinstance(formula, And):
+            return z3.And([self.encode(operand, environment, bound) for operand in formula.operands])
+        if isinstance(formula, Or):
+            return z3.Or([self.encode(operand, environment, bound) for operand in formula.operands])
+        if isinstance(formula, Implies):
+            return z3.Implies(
+                self.encode(formula.premise, environment, bound), self.encode(formula.conclusion, environment, bound)
+            )
+        if isinstance(formula, ForAll):
+            values = self.enums.get(formula.enum, [])
+            return z3.And([self.encode(formula.body, environment, {**bound, formula.variable: value}) for value in values])
+        raise TypeError(f"{type(formula).__name__} has no value in a single state")
+
+
+def smallest_model(
+    solver: z3.Solver, encoder: Encoder, names: list[str], environment: Environment
+) -> dict[str, str]:
+    assignment = {}
+    for name in names:
+        for position, value in enumerate(encoder.enums[name]):
+            solver.push()
+            solver.add(environment[name] == position)
+            if solver.check() == z3.sat:
+                assignment[name] = value
+                break
+            solver.pop()
+    return assignment
+
+
+def find_world(enums: dict[str, list[str]], formulas: list[Formula], names: list[str]) -> dict[str, str] | None:
+    encoder = Encoder(enums)
+    environment = {name: z3.Int(name) for name in names}
+    solver = z3.Solver()
+    for name, variable in environment.items():
+        solver.add(encoder.domain(name, variable))
+    for formula in formulas:
+        solver.add(encoder.encode(formula, environment))
+    if solver.check() != z3.sat:
+        return None
+    return smallest_model(solver, encoder, names, environment)
+
+
+Block = tuple[list[str], list[Formula]]
+
+
+@dataclass
+class Step:
+    label: str
+    machine: str
+    source: str
+    target: str
+    guard: Block
+    after: list[Formula]
+    effects: list[tuple[str, str, int]]
+    limits: dict[str, int | str]
+
+
+class TransitionSystem:
+    def __init__(
+        self, enums: dict[str, list[str]], states: list[str], start: dict[str, str], openings: list[Block], steps: list[Step]
+    ):
+        self.encoder = Encoder(enums)
+        self.states = states
+        self.start = start
+        self.openings = openings
+        self.steps = steps
+        self.fresh = 0
+
+    def frame(self, tag: str) -> Environment:
+        return {name: z3.Int(f"{name}@{tag}") for name in self.states}
+
+    def bounded(self, environment: Environment) -> list[z3.BoolRef]:
+        return [self.encoder.domain(name, variable) for name, variable in environment.items()]
+
+    def block(self, block: Block, environment: Environment) -> tuple[list[z3.BoolRef], Environment]:
+        names, formulas = block
+        self.fresh += 1
+        world = {name: z3.Int(f"{name}#{self.fresh}") for name in names}
+        merged = {**environment, **world}
+        return [*self.bounded(world), *(self.encoder.encode(formula, merged) for formula in formulas)], world
+
+    def opening(self, environment: Environment) -> list[z3.BoolRef]:
+        values = self.encoder.enums
+        constraints = [environment[name] == values[name].index(value) for name, value in self.start.items()]
+        for block in self.openings:
+            constraints += self.block(block, environment)[0]
+        return [*self.bounded(environment), *constraints]
+
+    def move(self, step: Step, before: Environment, after: Environment) -> list[z3.BoolRef]:
+        values = self.encoder.enums[step.machine]
+        constraints, world = self.block(step.guard, before)
+        constraints += [before[step.machine] == values.index(step.source), after[step.machine] == values.index(step.target)]
+        constraints += [self.encoder.encode(formula, {**after, **world}) for formula in step.after]
+        changed: dict[str, z3.ArithRef] = {}
+        for counter, operation, amount in step.effects:
+            if counter not in step.limits:
+                continue
+            if operation == "=":
+                changed[counter] = z3.IntVal(amount)
+                continue
+            limit = step.limits[counter]
+            ceiling = z3.IntVal(limit) if isinstance(limit, int) else self.encoder.number(True, limit, before)
+            changed[counter] = changed.get(counter, before[counter]) + amount
+            constraints.append(changed[counter] <= ceiling)
+        for name in self.states:
+            if name != step.machine:
+                constraints.append(after[name] == changed.get(name, before[name]))
+        return [*self.bounded(after), *constraints]
+
+    def reachable(self, bad: Block) -> bool | None:
+        fixedpoint = z3.Fixedpoint()
+        fixedpoint.set(engine="spacer")
+        reach = z3.Function("reach", *[z3.IntSort()] * len(self.states), z3.BoolSort())
+        failure = z3.Function("failure", z3.BoolSort())
+        fixedpoint.register_relation(reach, failure)
+        before, after = self.frame("before"), self.frame("after")
+
+        def rule(head: z3.BoolRef, body: list[z3.BoolRef]) -> None:
+            implication = z3.Implies(z3.And(body), head)
+            variables = [variable for variable in z3util.get_vars(implication) if z3.is_int(variable)]
+            fixedpoint.add_rule(z3.ForAll(variables, implication) if variables else implication)
+
+        rule(reach(*before.values()), self.opening(before))
+        for step in self.steps:
+            rule(reach(*after.values()), [reach(*before.values()), *self.move(step, before, after)])
+        rule(failure(), [reach(*before.values()), *self.block(bad, before)[0]])
+        answer = fixedpoint.query(failure())
+        return None if answer == z3.unknown else answer == z3.sat
+
+    def witness(self, bad: Block) -> tuple[list[str], dict[str, str]]:
+        solver = z3.Solver()
+        frames = [self.frame("0")]
+        choices: list[z3.ArithRef] = []
+        solver.add(self.opening(frames[0]))
+        while True:
+            solver.push()
+            constraints, world = self.block(bad, frames[-1])
+            solver.add(constraints)
+            if solver.check() == z3.sat:
+                break
+            solver.pop()
+            choice = z3.Int(f"choice@{len(choices)}")
+            following = self.frame(str(len(frames)))
+            solver.add(choice >= 0, choice < len(self.steps))
+            for position, step in enumerate(self.steps):
+                solver.add(z3.Implies(choice == position, z3.And(self.move(step, frames[-1], following))))
+            choices.append(choice)
+            frames.append(following)
+        path = []
+        for choice in choices:
+            for position, step in enumerate(self.steps):
+                solver.push()
+                solver.add(choice == position)
+                if solver.check() == z3.sat:
+                    path.append(step.label)
+                    break
+                solver.pop()
+        final = {**frames[-1], **world}
+        return path, smallest_model(solver, self.encoder, sorted(final), final)
+
+    def reach(self, bad: Block) -> tuple[list[str], dict[str, str]] | bool:
+        answer = self.reachable(bad)
+        if answer is None:
+            return True
+        return self.witness(bad) if answer else False
+
+
+def term_text(term: Term) -> str:
+    if isinstance(term, Reference):
+        return f"{term.entity}.{term.attribute}"
+    return f"{term.function}({term_text(term.argument)})"
+
+
+def conflicting_laws(laws: list[Law]) -> list[Law]:
+    months: dict[str, tuple[z3.ArithRef, z3.ArithRef]] = {}
+
+    def value(term: Term) -> z3.ArithRef:
+        if isinstance(term, Reference):
+            return z3.Int(term_text(term))
+        argument = value(term.argument)
+        if term.function == "next":
+            return argument + 1
+        if term.function == "before":
+            return argument - 1
+        return months.setdefault(term_text(term), (argument, z3.Int(term_text(term))))[1]
+
+    constraints = [
+        {"=": operator.eq, **ORDERINGS}[law.operator](value(law.left), value(law.right)) for law in laws
+    ]
+    # month_of is monotone, which is all the laws can observe of it.
+    ordering = [
+        z3.Implies(day <= other_day, month <= other_month)
+        for day, month in months.values()
+        for other_day, other_month in months.values()
+    ]
+
+    def consistent(kept: list[int]) -> bool:
+        solver = z3.Solver()
+        solver.add(ordering)
+        solver.add([constraints[position] for position in kept])
+        return solver.check() != z3.unsat
+
+    kept = list(range(len(laws)))
+    if consistent(kept):
+        return []
+    for position in range(len(laws)):
+        without = [other for other in kept if other != position]
+        if not consistent(without):
+            kept = without
+    return [laws[position] for position in kept]

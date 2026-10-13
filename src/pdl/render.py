@@ -30,6 +30,7 @@ LABELS = {
         "appendix_note": "아래는 개발자를 위한 정리이다.",
         "matrix_note": "조건부는 행 상태나 업로드 상태 같은 조건에 따라 허용 여부가 달라진다는 뜻이며, 조건은 위의 규칙 문장을 따른다.",
         "terms": "용어",
+        "constants": "정해지지 않은 값의 범위",
         "cyclic": "끝나지 않고 처음 상태로 돌아가며 반복되는 흐름",
         "counter": "카운터",
         "instance": "건마다 따로 진행되는 대상",
@@ -93,6 +94,7 @@ LABELS = {
         "appendix_note": "The tables below are for developers.",
         "matrix_note": "Conditional means the result depends on a condition stated in the rules above.",
         "terms": "Terms",
+        "constants": "Ranges of undecided values",
         "cyclic": "A flow that never ends and returns to the initial state",
         "counter": "Counter",
         "instance": "One flow for each",
@@ -335,7 +337,7 @@ def render_machines(
             lines.append(f"- {labels['instance']}: {names.show(machine.entity)}")
         for counter, maximum in machine.counters.items():
             shown = machine.counter_labels.get(counter) if language == "ko" else None
-            lines.append(f"- {labels['counter']}: {shown or counter} (0 ~ {maximum})")
+            lines.append(f"- {labels['counter']}: {shown or counter} (0 ~ {machine.counter_bounds.get(counter, maximum)})")
         lines.append("")
         for transition in machine.transitions:
             source = state_text(machine, transition.source)
@@ -459,6 +461,15 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
     if module.terms:
         lines += [f"## {labels['terms']}", ""]
         lines += [f"- {names.show(term.name)}: {term.why}" for term in module.terms]
+        lines.append("")
+    if module.constants:
+        lines += [f"## {labels['constants']}", ""]
+        for constant in module.constants:
+            shown = constant.label if language == "ko" and constant.label else constant.name
+            note = assumption_text(constant.assumes, module, labels)
+            lines.append(f"- {shown}: {constant.low} ~ {constant.high}{note}")
+            if constant.why:
+                lines.append(f"  - {labels['why']}: {constant.why}")
         lines.append("")
     if module.laws:
         lines += [f"## {labels['laws']}", ""]

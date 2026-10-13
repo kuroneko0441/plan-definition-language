@@ -74,11 +74,12 @@ def attach(text: str, with_consonant: str, without_consonant: str) -> str:
 
 
 PRECEDENCE = {Implies: 1, Or: 2, And: 3}
+SYMBOLS = {"!=": "≠", "<=": "≤", ">=": "≥"}
 
 
 def formula_text(formula: Formula, parent: int = 0) -> str:
     if isinstance(formula, Atom):
-        return f"{formula.left} {'=' if formula.operator == '=' else '≠'} {formula.right}"
+        return f"{formula.left} {SYMBOLS.get(formula.operator, formula.operator)} {formula.right}"
     if isinstance(formula, InSet):
         return f"{formula.left} ∈ {{{', '.join(formula.values)}}}"
     if isinstance(formula, Not):
@@ -112,7 +113,7 @@ def korean_condition(conditions: list[Formula], names: Names) -> str:
             phrases.append(
                 f"{subject} '{shown}'" + ("이" if has_final_consonant(shown) else "가") + (" 아닐 때" if last else " 아니고")
             )
-        elif isinstance(condition, Atom):
+        elif isinstance(condition, Atom) and condition.operator == "=":
             subject = attach(names.show(condition.left), "이", "가")
             shown = names.value(condition.left, condition.right)
             phrases.append(f"{subject} '{shown}'" + ("일 때" if last else "이고"))
@@ -128,7 +129,7 @@ def english_condition(conditions: list[Formula], names: Names) -> str:
             parts.append(f"{names.show(condition.left)} is one of {', '.join(condition.values)}")
         elif isinstance(condition, Atom) and condition.operator == "!=":
             parts.append(f"{names.show(condition.left)} is not {condition.right}")
-        elif isinstance(condition, Atom):
+        elif isinstance(condition, Atom) and condition.operator == "=":
             parts.append(f"{names.show(condition.left)} is {names.value(condition.left, condition.right)}")
         else:
             parts.append(f"`{formula_text(condition)}` holds")

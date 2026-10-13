@@ -16,6 +16,7 @@ from .model import (
     Module,
     Not,
     Or,
+    Premise,
 )
 
 MAXIMUM_SCOPE = 6
@@ -92,7 +93,10 @@ class Expander:
                 self.atoms[name] = [f"{name}{number}" for number in range(1, count + 1)]
         self.atom_types = {atom: name for name, atoms in self.atoms.items() for atom in atoms}
         self.bound: dict[str, dict[str, Machine]] = {}
-        self.globals = set(self.enums)
+        self.constants = {}
+        for constant in module.constants:
+            self.constants.setdefault(constant.name, constant)
+        self.globals = set(self.enums) | set(self.constants)
         for machine in module.machines:
             if machine.entity in self.atoms:
                 self.bound.setdefault(machine.entity, {})[machine.name] = machine
@@ -100,6 +104,15 @@ class Expander:
                 self.globals |= {machine.name, *machine.counters}
         self.variables: dict[str, EnumDefinition] = {}
         self.rigid: list[str] = []
+        self.bounds: list[Premise] = []
+        for constant in self.constants.values():
+            values = [str(number) for number in range(constant.low, constant.high + 1)]
+            self.variables[constant.name] = EnumDefinition(constant.line, constant.name, values)
+            self.rigid.append(constant.name)
+
+    def maximum(self, machine: Machine, counter: str) -> int:
+        constant = self.constants.get(machine.counter_bounds.get(counter, ""))
+        return constant.high if constant is not None else machine.counters[counter]
 
     def relational(self, formula: Formula) -> bool:
         return (
@@ -132,7 +145,7 @@ class Expander:
             return Leaf("var", full, f"{entity}.{name}", tuple(machines[name].states))
         for machine in machines.values():
             if name in machine.counters:
-                values = tuple(str(number) for number in range(machine.counters[name] + 1))
+                values = tuple(str(number) for number in range(self.maximum(machine, name) + 1))
                 return Leaf("var", full, "counter", values)
         raise ExpansionError(f"{entity} has no field, machine, or counter named {name}")
 
@@ -181,12 +194,21 @@ class Expander:
         return truth(left.text == right.text)
 
     def compare(self, formula: Atom, environment: dict[str, Leaf], line: int) -> Formula:
+        ordered = formula.operator not in ("=", "!=")
         cases = [
-            conjunction([*left_conditions, *right_conditions, self.equal(left, right)])
+            conjunction(
+                [
+                    *left_conditions,
+                    *right_conditions,
+                    Atom(left.text, formula.operator, right.text) if ordered else self.equal(left, right),
+                ]
+            )
             for left_conditions, left in self.expand_term(formula.left, environment, line)
             for right_conditions, right in self.expand_term(formula.right, environment, line)
         ]
         result = cases[0] if len(cases) == 1 else Or(cases)
+        if ordered:
+            return result
         if formula.operator == "=":
             return result
         if isinstance(result, Atom):
@@ -252,14 +274,20 @@ class Expander:
         environment: dict[str, Leaf] = {}
         if atom:
             environment[THIS] = Leaf("const", atom, machine.entity)
-            for counter, maximum in machine.counters.items():
-                values = tuple(str(number) for number in range(maximum + 1))
+            for counter in machine.counters:
+                values = tuple(str(number) for number in range(self.maximum(machine, counter) + 1))
                 environment[counter] = Leaf("var", prefix + counter, "counter", values)
+        for counter, constant in machine.counter_bounds.items():
+            if constant in self.constants:
+                self.bounds.append(Premise(machine.line, "", Atom(prefix + counter, "<=", constant)))
+            elif not replica:
+                self.problems.append(("UNDEFINED", f"maximum {constant} of counter {counter} is not a constant", machine.line))
         return replace(
             machine,
             name=prefix + machine.name,
             replica=replica,
-            counters={prefix + counter: maximum for counter, maximum in machine.counters.items()},
+            counters={prefix + counter: self.maximum(machine, counter) for counter in machine.counters},
+            counter_bounds={prefix + counter: constant for counter, constant in machine.counter_bounds.items()},
             transitions=[
                 replace(
                     transition,
@@ -331,7 +359,8 @@ def expand(module: Module) -> tuple[Module, list[Problem]]:
             for exclusion in module.exclusions
         ],
         invariants=[replace(item, formula=expander.formula(item.formula, {}, item.line)) for item in module.invariants],
-        premises=[replace(item, formula=expander.formula(item.formula, {}, item.line)) for item in module.premises],
+        premises=[replace(item, formula=expander.formula(item.formula, {}, item.line)) for item in module.premises]
+        + expander.bounds,
         assertions=[replace(item, formula=expander.formula(item.formula, {}, item.line)) for item in module.assertions],
     )
     expanded.variables = list(expander.variables.values())

@@ -1,6 +1,7 @@
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest import mock
 
 from pdl.checks import check
 from pdl.cli import check_consistency
@@ -938,6 +939,133 @@ class RelationTest(unittest.TestCase):
         self.assertIn("In Open when this.dealer.grade is Gold, Finish moves to Done.", document)
         self.assertIn("dealer: Dealer [fixed]", document)
         self.assertIn("- a: `always ∃ o ∈ Order : o.Flow = Open`", document)
+
+
+LOGIN = (
+    "module m\nexternal Sys\nconst limit in 1..4\n"
+    "machine Login { states Active, Locked\ninitial Active\nterminal Locked\nevent Fail\ncounter Tries max limit\n"
+    "Active -> Active on Fail when Tries < limit then Tries + 1 by Sys\n"
+    "Active -> Locked on Fail when Tries = limit by Sys\nreject Locked on Fail }\n"
+)
+
+
+class ConstantTest(unittest.TestCase):
+    def failures(self, text: str) -> list[str]:
+        return [f.message for f in check(parse_module(text)) if f.kind == "ASSERTION_FAILED"]
+
+    def test_a_plan_is_checked_for_every_value_of_a_constant(self):
+        self.assertEqual(blocking_kinds(LOGIN + "assert a: always Login = Locked => Tries = limit\n"), Counter())
+        failures = self.failures(LOGIN + "assert a: always Tries >= 2 => Login = Locked\n")
+        self.assertEqual(failures, ["assertion a fails after: Login: Fail -> Login: Fail with limit=2 (Login=Active, Tries=2, limit=2)"])
+
+    def test_a_guard_that_misses_a_value_of_the_constant_is_uncovered(self):
+        text = LOGIN.replace("when Tries = limit", "when Tries = 4")
+        self.assertIn("UNCOVERED", blocking_kinds(text))
+
+    def test_a_counter_cannot_pass_the_constant(self):
+        text = LOGIN.replace("when Tries < limit then", "when Tries <= limit then").replace("when Tries = limit", "when Tries > limit")
+        self.assertEqual(blocking_kinds(text)["OVERFLOW"], 1)
+
+    def test_a_scenario_gives_the_constant_a_value(self):
+        text = LOGIN + "scenario s on Login { start Active given limit = 2 events Fail, Fail, Fail expect Locked }\n"
+        self.assertEqual(blocking_kinds(text), Counter())
+        self.assertEqual(blocking_kinds(text.replace("given limit = 2", "given limit = 3")), Counter({"SCENARIO_FAILED": 1}))
+
+    def test_an_ordering_needs_numbers(self):
+        text = GUARDED.replace("when G = On", "when G < On")
+        self.assertIn("UNIT_MISMATCH", blocking_kinds(text))
+
+    def test_a_counter_maximum_names_a_constant(self):
+        self.assertIn("UNDEFINED", blocking_kinds(LOGIN.replace("max limit", "max nothing")))
+
+    def test_a_constant_carries_the_unknown_it_stands_for(self):
+        text = LOGIN.replace("const limit in 1..4", 'const limit in 1..4 label "잠금 횟수" assuming lock_limit')
+        text += 'unknown value lock_limit { label "잠금 횟수" source "회의록" provisional "3회" }\n'
+        module = parse_module(text)
+        findings = check(module)
+        self.assertEqual([f.kind for f in findings], ["UNVERIFIED"])
+        document = render(module, findings)
+        self.assertIn("- 잠금 횟수: 1 ~ 4 (가정: 잠금 횟수)", document)
+        self.assertIn("(0 ~ limit)", document)
+
+
+class SolverTest(unittest.TestCase):
+    texts = [
+        LIBRARY, UNCOVERED_LIBRARY, COVERED_MACHINE, GUARDED, COUNTER_MACHINE, CROSS_MACHINES, GUARDED_IGNORE,
+        GUARDED_PAIR, FLAGGED, FREE_PAIR, SHOP, SHOP + GOLD_ONLY, LOGIN,
+        GUARDED.replace("when G = Off", "when G in {On, Off}"),
+        GUARDED.replace("A -> C on Go when G = Off by Ext\n", ""),
+        GUARDED_IGNORE.replace("ignore A on E when S = Off", "ignore A on E when S in {On, Off}"),
+        "module m\nenum S = A | B | C\nactor X\naction Do\nentity R\npermit X Do R when S in {A, B}\nforbid X Do R when S != A\n",
+        "module m\nenum S = A | B\nexclusive S = A, S = A\ninvariant i: S = A\n",
+        FREE_PAIR + "assert a: always T = Done => P = Ok\nassert r: reachable T = Done and P = Bad\n",
+        GUARDED_PAIR + "assert a: always T = Done => P = Ok\nassert r: reachable T = Done and P = Bad\n",
+        FLAGGED + "assert a: always M = B => Flag = On\nassert r: reachable M = B and Flag = Off\n",
+        SHOP + GOLD_ONLY + "assert a: always exists o in Order: o.Flow = Open\nassert b: always forall o in Order: o.dealer = Dealer1\n",
+        LOGIN + "assert a: always Tries >= 2 => Login = Locked\nassert b: always Login = Locked => Tries = limit\n",
+        "module m\nexternal Ext\n"
+        "machine P { states Ok, Bad\ninitial Ok\nterminal Bad\nevent Fail\nOk -> Ok on Fail by Ext\nignore Bad on Fail }\n"
+        "machine T { states Open, Done\ninitial Open\nterminal Done\nevent Finish\n"
+        "Open -> Done on Finish when P = Bad by Ext\nignore Open on Finish\nignore Done on Finish }\n",
+    ]
+
+    def test_the_solver_agrees_with_enumeration_on_worlds(self):
+        for text in self.texts:
+            listed = Counter(f.kind for f in check(parse_module(text)) if f.kind in ("CONTRADICTION", "UNCOVERED"))
+            with mock.patch("pdl.checks.worlds", side_effect=static_only):
+                solved = Counter(f.kind for f in check(parse_module(text)) if f.kind in ("CONTRADICTION", "UNCOVERED"))
+            self.assertEqual(solved, listed, text[:60])
+
+    def test_the_solver_agrees_with_enumeration_on_reachability(self):
+        for text in self.texts:
+            module = parse_module(text)
+            plain = {assertion.line for assertion in module.assertions if "can" not in assertion_text(assertion)}
+
+            def compared(findings):
+                return sorted(
+                    (f.kind, f.line)
+                    for f in findings
+                    if f.message.startswith("an invariant over machine states fails")
+                    or "is never reached" in f.message
+                    or (f.kind == "ASSERTION_FAILED" and f.line in plain)
+                )
+
+            listed = compared(check(module))
+            with mock.patch("pdl.checks.SYSTEM_LIMIT", 0):
+                solved = compared(check(module))
+            self.assertEqual(solved, listed, text[:60])
+
+    def test_a_space_too_large_to_enumerate_is_solved(self):
+        enums = "".join(f"enum E{number} = A | B | C | D\n" for number in range(12))
+        every = " and ".join(f"E{number} = A" for number in range(12))
+        base = "module m\n" + enums + "actor X\naction Do\nentity R\n"
+        gap = [f for f in check(parse_module(base + f"permit X Do R when {every}\n")) if f.blocking]
+        self.assertEqual([f.kind for f in gap], ["UNCOVERED"])
+        self.assertIn("E0=A, E1=A, E10=A, E11=A, E2=A, E3=A, E4=A, E5=A, E6=A, E7=A, E8=A, E9=B", gap[0].message)
+        clash = base + f"permit X Do R when {every}\nforbid X Do R when E0 = A\nforbid X Do R when E0 != A\n"
+        self.assertEqual(blocking_kinds(clash), Counter({"CONTRADICTION": 1}))
+        covered = base + "permit X Do R when E0 = A\nforbid X Do R when E0 != A\n"
+        self.assertEqual(blocking_kinds(covered), Counter())
+
+    def test_laws_that_cannot_hold_together_contradict(self):
+        base = "module m\nentity X { d: Day\ne: Day\nf: Day }\n"
+        clash = base + "law a: X.d < X.e\nlaw free: X.f < next(X.f)\nlaw b: X.e < X.d\n"
+        findings = [f for f in check(parse_module(clash)) if f.blocking]
+        self.assertEqual([f.message for f in findings], ["the laws a, b cannot hold together"])
+        self.assertEqual(blocking_kinds(base + "law a: X.d < X.e\nlaw b: X.e < next(X.e)\n"), Counter())
+        self.assertEqual(blocking_kinds(base + "law a: X.d < before(X.d)\n"), Counter({"CONTRADICTION": 1}))
+        months = base + "law a: month_of(X.d) < month_of(X.e)\nlaw b: X.e <= X.d\n"
+        self.assertEqual(blocking_kinds(months), Counter({"CONTRADICTION": 1}))
+
+
+def static_only(index, variables):
+    return None
+
+
+def assertion_text(assertion) -> str:
+    from pdl.prose import formula_text
+
+    return formula_text(assertion.formula)
 
 
 class ConsistencyTest(unittest.TestCase):

@@ -1,10 +1,12 @@
 """Hole detection for plan definition language modules."""
 
+import operator
 from collections import deque
 from dataclasses import dataclass
 from itertools import product
 
 from .ground import expand
+from .solver import Block, Step, TransitionSystem, conflicting_laws, find_world
 from .model import (
     And,
     Atom,
@@ -29,6 +31,7 @@ from .model import (
 
 TIME_TYPES = ("Day", "Week", "Month")
 BUILTIN_TYPES = ("Text", "Int", "Bool", "Timestamp", "Decimal", "Money", "Duration") + TIME_TYPES
+ORDERINGS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
 ENUMERATION_LIMIT = 20000
 SAMPLE_LIMIT = 6
 SYSTEM_LIMIT = 100000
@@ -118,6 +121,7 @@ class Index:
             (item.line for item in (*module.invariants, *module.exclusions, *module.premises)), default=0
         )
         self.system: System | None = None
+        self.symbolic: TransitionSystem | None = None
 
     def applies(self, action: str, actor: str, resource: str) -> bool:
         return actor in self.action_actors.get(action, {actor}) and resource in self.action_resources.get(
@@ -146,8 +150,11 @@ def resolve(term: str, assignment: dict[str, str], bound: dict[str, str]) -> str
 
 def evaluate(formula: Formula, assignment: dict[str, str], bound: dict[str, str], index: Index) -> bool:
     if isinstance(formula, Atom):
-        equal = resolve(formula.left, assignment, bound) == resolve(formula.right, assignment, bound)
-        return equal if formula.operator == "=" else not equal
+        left = resolve(formula.left, assignment, bound)
+        right = resolve(formula.right, assignment, bound)
+        if formula.operator in ORDERINGS:
+            return left.isdigit() and right.isdigit() and ORDERINGS[formula.operator](int(left), int(right))
+        return (left == right) == (formula.operator == "=")
     if isinstance(formula, InSet):
         return resolve(formula.left, assignment, bound) in formula.values
     if isinstance(formula, Not):
@@ -193,7 +200,7 @@ def condition_holds(condition: Formula, assignment: dict[str, str], index: Index
     return free_enums(condition, index) <= assignment.keys() and evaluate(condition, assignment, {}, index)
 
 
-def worlds(index: Index, variables: set[str]) -> list[dict[str, str]] | None:
+def closure(index: Index, variables: set[str]) -> set[str]:
     chosen = set(variables)
     changed = True
     while changed:
@@ -202,6 +209,18 @@ def worlds(index: Index, variables: set[str]) -> list[dict[str, str]] | None:
             if enums & chosen and not enums <= chosen:
                 chosen |= enums
                 changed = True
+    return chosen
+
+
+def solve(index: Index, variables: set[str], requirement: Formula) -> dict[str, str] | None:
+    chosen = closure(index, variables)
+    facts = [formula for formula, enums in index.invariant_terms if enums and enums <= chosen]
+    values = {name: definition.values for name, definition in index.enums.items()}
+    return find_world(values, [*facts, requirement], sorted(chosen))
+
+
+def worlds(index: Index, variables: set[str]) -> list[dict[str, str]] | None:
+    chosen = closure(index, variables)
     names = sorted(chosen)
     domains = [index.enums[name].values for name in names]
     size = 1
@@ -323,7 +342,17 @@ def check_formula(
     if isinstance(formula, Atom):
         left = term_enum(formula.left, bound, index)
         right = term_enum(formula.right, bound, index)
-        if left is None and right is None:
+        numbers = [
+            term.isdigit() if enum is None else all(value.isdigit() for value in index.enums[enum].values)
+            for term, enum in ((formula.left, left), (formula.right, right))
+        ]
+        if formula.operator in ORDERINGS and not all(numbers):
+            findings.append(
+                Finding("UNIT_MISMATCH", f"{formula.left} {formula.operator} {formula.right} compares values that are not numbers", line)
+            )
+        elif all(numbers) and (left is not None or right is not None):
+            return
+        elif left is None and right is None:
             findings.append(
                 Finding("UNDEFINED", f"neither {formula.left} nor {formula.right} is an enum or a bound variable", line)
             )
@@ -369,9 +398,9 @@ def check_invariants(module: Module, index: Index) -> list[Finding]:
     size = 1
     for domain in domains:
         size *= len(domain)
-    if size > ENUMERATION_LIMIT:
+    if size > ENUMERATION_LIMIT and solve(index, set(enums), And([])) is not None:
         return findings
-    for values in product(*domains):
+    for values in product(*domains) if size <= ENUMERATION_LIMIT else ():
         assignment = dict(zip(enums, values))
         if all(evaluate(formula, assignment, {}, index) for formula, _ in index.invariant_terms):
             return findings
@@ -488,9 +517,25 @@ def check_permissions(module: Module, index: Index) -> list[Finding]:
         outcomes = triple_outcomes(module, index, actor, action, resource)
         label = f"{actor} {action} {resource}"
         if outcomes is None:
-            findings.append(
-                Finding("TOO_LARGE", f"{label} has too many condition combinations to enumerate", 0)
-            )
+            matching = [rule for rule in module.rules if rule_matches(rule, actor, action, resource)]
+            variables = set().union(*(guard_enums(rule.conditions, index) for rule in matching))
+            applies = {effect: Or([And(rule.conditions) for rule in matching if rule.effect == effect]) for effect in ("permit", "forbid")}
+            clash = solve(index, variables, And(list(applies.values())))
+            if clash is not None:
+                lines = sorted(
+                    rule.line for rule in matching if all(condition_holds(c, clash, index) for c in rule.conditions)
+                )
+                findings.append(
+                    Finding(
+                        "CONTRADICTION",
+                        f"{label} is both permitted and forbidden when {describe(clash)}"
+                        f" (rules at lines {', '.join(map(str, lines))})",
+                        lines[0],
+                    )
+                )
+            gap = solve(index, variables, Not(Or(list(applies.values()))))
+            if gap is not None:
+                findings.append(Finding("UNCOVERED", f"{label} has no rule when {describe(gap)}", 0))
             continue
         contradictions = [
             outcome
@@ -576,7 +621,20 @@ def check_guards(
         variables = set().union(*(guard_enums(item.conditions, index) for item in (*group, *held)))
         assignments = worlds(index, variables)
         if assignments is None:
-            findings.append(Finding("TOO_LARGE", f"{label} has too many guard combinations to enumerate", line))
+            moves = [And(transition.conditions) for transition in group]
+            holds = [And(handling.conditions) for handling in held]
+            clashes = [
+                And([moves[first], moves[second]])
+                for first in range(len(group))
+                for second in range(first + 1, len(group))
+                if transition_outcome(group[first]) != transition_outcome(group[second])
+            ]
+            clash = solve(index, variables, Or([*clashes, And([Or(moves), Or(holds)])]))
+            if clash is not None:
+                findings.append(Finding("CONTRADICTION", f"{label} has conflicting outcomes when {describe(clash)}", line))
+            gap = None if (state, event) in else_covered else solve(index, variables, Not(Or([*moves, *holds])))
+            if gap is not None:
+                findings.append(Finding("UNCOVERED", f"{label} has no outcome when {describe(gap)}", line))
             continue
         conflicts = []
         gaps = []
@@ -755,6 +813,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
         return []
     counter_order = [counter for _, counter in counters]
     limits = {counter: machine.counters[counter] for machine in machines for counter in machine.counters}
+    bounds = {counter: constant for machine in machines for counter, constant in machine.counter_bounds.items()}
     seen: dict[tuple, tuple | None] = {}
     steps: dict[tuple, str] = {}
     findings: list[Finding] = []
@@ -807,10 +866,8 @@ def check_system(module: Module, index: Index) -> list[Finding]:
     size = 1
     for domain in domains:
         size *= len(domain)
-    if size > SYSTEM_LIMIT:
-        return findings + [Finding("TOO_LARGE", "the fixed fields have too many combinations to explore", 0)]
     problems = []
-    for fixed in product(*domains):
+    for fixed in product(*domains) if size <= SYSTEM_LIMIT else ():
         initial = (tuple(machine.initial for machine in machines), tuple(0 for _ in counter_order), fixed)
         start = system.assignment(initial)
         if not all(evaluate(formula, start, {}, index) for formula in settled):
@@ -820,10 +877,83 @@ def check_system(module: Module, index: Index) -> list[Finding]:
             seen[initial] = None
         else:
             problems.append(problem)
-    if not seen:
+    if not seen and size <= SYSTEM_LIMIT:
         message = "no values of the fixed fields satisfy the invariants"
         findings.append(problems[0] if problems else Finding("CONTRADICTION", message, index.fact_line))
     queue = deque(seen)
+
+    def block(variables: set[str], formulas: list[Formula]) -> Block:
+        chosen = closure(index, variables)
+        facts = [formula for formula, enums in index.invariant_terms if enums and enums <= chosen]
+        return sorted(chosen - interesting), [*facts, *formulas]
+
+    def solved() -> list[Finding]:
+        moves = []
+        for machine in machines:
+            for transition in machine.transitions:
+                changed = {machine.name, *(counter for counter, _, _ in transition.effects)}
+                variables = guard_enums(transition.conditions, index) - interesting
+                for _, enums in (*mixed, *pruning):
+                    if enums & changed:
+                        variables |= enums - interesting
+                known = closure(index, variables) | interesting
+                moves.append(
+                    Step(
+                        f"{machine.name}: {transition.event}",
+                        machine.name,
+                        transition.source,
+                        transition.target,
+                        block(variables, transition.conditions),
+                        [formula for formula, enums in pruning if enums <= known],
+                        transition.effects,
+                        {counter: bounds.get(counter, limits[counter]) for counter in limits},
+                    )
+                )
+        openings = [([], settled)]
+        openings += [block(enums - interesting, []) for _, enums in mixed]
+        openings += [block(enums - interesting, [formula]) for formula, enums in pruning]
+        opening = {machine.name: machine.initial for machine in machines}
+        opening.update({counter: "0" for counter in counter_order})
+        values = {name: definition.values for name, definition in index.enums.items()}
+        index.symbolic = TransitionSystem(values, [*opening, *rigid], opening, openings, moves)
+        result = [
+            Finding(
+                "TOO_LARGE",
+                "the combined state space is too large to enumerate, so only invariants over machine states,"
+                " unreachable states, and assertions without can were checked",
+                0,
+            )
+        ]
+        for position, formula in enumerate(watched):
+            if position in violated:
+                continue
+            answer = index.symbolic.reach(([], [Not(formula)]))
+            if answer is True:
+                result.append(Finding("TOO_LARGE", "the solver could not decide an invariant over machine states", index.fact_line))
+            elif answer:
+                route, state = answer
+                result.append(
+                    Finding(
+                        "INVARIANT_VIOLATED",
+                        f"an invariant over machine states fails after: {solved_path(route, state, rigid)} ({describe(state)})",
+                        module.invariants[0].line,
+                    )
+                )
+        for machine in machines:
+            forward: dict[str, set[str]] = {}
+            for transition in machine.transitions:
+                forward.setdefault(transition.source, set()).add(transition.target)
+            for state in machine.states:
+                if machine.replica or state not in reachable_from(machine.initial, forward):
+                    continue
+                if index.symbolic.reach(([], [Atom(machine.name, "=", state)])) is False:
+                    result.append(
+                        Finding("UNREACHABLE", f"state {state} of {machine.name} is never reached once guards and counters are applied", machine.line)
+                    )
+        return result
+
+    if size > SYSTEM_LIMIT:
+        return findings + solved()
 
     while queue:
         config = queue.popleft()
@@ -863,7 +993,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                     position = counter_order.index(counter)
                     if operator == "=":
                         new_values[position] = amount
-                    elif new_values[position] + amount > limits[counter]:
+                    elif new_values[position] + amount > int(assignment.get(bounds.get(counter, ""), limits[counter])):
                         overflow = True
                         key = (counter, transition.line)
                         if key not in reported_overflow:
@@ -871,7 +1001,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                             findings.append(
                                 Finding(
                                     "OVERFLOW",
-                                    f"{counter} can exceed {limits[counter]} on {transition.source} -> {transition.target}"
+                                    f"{counter} can exceed {bounds.get(counter, limits[counter])} on {transition.source} -> {transition.target}"
                                     f" on {transition.event} after: {describe_path(config)}",
                                     transition.line,
                                 )
@@ -920,7 +1050,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                     steps[successor] = f"{machine.name}: {transition.event}"
                     queue.append(successor)
                     if len(seen) > SYSTEM_LIMIT:
-                        return findings + [Finding("TOO_LARGE", "the combined state space is too large to explore", 0)]
+                        return findings + solved()
     for number, machine in enumerate(machines):
         if machine.replica:
             continue
@@ -963,6 +1093,34 @@ def check_system(module: Module, index: Index) -> list[Finding]:
     return findings
 
 
+def solved_path(route: list[str], state: dict[str, str], rigid: list[str]) -> str:
+    path = " -> ".join(route) or "the start"
+    return f"{path} with {describe({name: state[name] for name in rigid})}" if rigid else path
+
+
+def solved_assertions(module: Module, index: Index) -> list[Finding]:
+    system = index.symbolic
+    findings = []
+    for assertion in module.assertions:
+        label = f"assertion {assertion.name}"
+        if outer_cans(assertion.formula):
+            findings.append(Finding("TOO_LARGE", f"{label} uses can, which needs the enumerated state space", assertion.line))
+            continue
+        chosen = closure(index, free_enums(assertion.formula, index) - set(system.states))
+        facts = [formula for formula, enums in index.invariant_terms if enums and enums <= chosen]
+        wanted = assertion.formula if assertion.mode == "reachable" else Not(assertion.formula)
+        answer = system.reach((sorted(chosen - set(system.states)), [*facts, wanted]))
+        if answer is True:
+            findings.append(Finding("TOO_LARGE", f"the solver could not decide {label}", assertion.line))
+        elif assertion.mode == "reachable" and answer is False:
+            findings.append(Finding("ASSERTION_FAILED", f"{label} holds in no reachable state", assertion.line))
+        elif assertion.mode == "always" and answer:
+            route, state = answer
+            where = f"after: {solved_path(route, state, module.rigid)}" if route else "at the start"
+            findings.append(Finding("ASSERTION_FAILED", f"{label} fails {where} ({describe(state)})", assertion.line))
+    return findings
+
+
 def outer_cans(formula: Formula) -> list[Can]:
     if isinstance(formula, Can):
         return [formula]
@@ -982,7 +1140,7 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
     if not module.assertions:
         return []
     if system is None:
-        return [Finding("TOO_LARGE", "the assertions were not checked because the state space is too large", module.assertions[0].line)]
+        return solved_assertions(module, index) if index.symbolic is not None else []
     findings: list[Finding] = []
     scopes: dict[int, list[dict[str, str]] | None] = {}
     can_sets: dict[int, set[tuple]] = {}
@@ -1222,12 +1380,17 @@ def check_laws(module: Module, index: Index) -> list[Finding]:
             findings.append(
                 Finding("UNIT_MISMATCH", f"law {law.identifier} compares {left} with {right}", law.line)
             )
+    if not findings:
+        clashing = conflicting_laws(module.laws)
+        if clashing:
+            names = ", ".join(law.identifier for law in clashing)
+            findings.append(Finding("CONTRADICTION", f"the laws {names} cannot hold together", clashing[0].line))
     return findings
 
 
 def referenced_unknowns(module: Module) -> set[str]:
     referenced: set[str] = set()
-    for owner in (*module.rules, *module.laws, *module.screens, *module.derivations):
+    for owner in (*module.rules, *module.laws, *module.screens, *module.derivations, *module.constants):
         referenced.update(owner.assumes)
     for machine in module.machines:
         for item in (*machine.transitions, *machine.handlings):
@@ -1237,6 +1400,8 @@ def referenced_unknowns(module: Module) -> set[str]:
 
 def check_unknowns(module: Module, index: Index) -> list[Finding]:
     findings = []
+    for constant in module.constants:
+        findings.extend(check_assumptions(constant.assumes, index, constant.line, f"constant {constant.name}"))
     referenced = referenced_unknowns(module)
     for unknown in module.unknowns:
         attributes = unknown.attributes

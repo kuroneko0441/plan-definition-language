@@ -337,7 +337,8 @@ def render_machines(
             lines.append(f"- {labels['instance']}: {names.show(machine.entity)}")
         for counter, maximum in machine.counters.items():
             shown = machine.counter_labels.get(counter) if language == "ko" else None
-            lines.append(f"- {labels['counter']}: {shown or counter} (0 ~ {machine.counter_bounds.get(counter, maximum)})")
+            limit = names.show(machine.counter_bounds[counter]) if counter in machine.counter_bounds else maximum
+            lines.append(f"- {labels['counter']}: {shown or counter} (0 ~ {limit})")
         lines.append("")
         for transition in machine.transitions:
             source = state_text(machine, transition.source)

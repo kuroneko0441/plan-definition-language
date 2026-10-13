@@ -12,6 +12,7 @@ class Names:
         self.labels: dict[str, str] = {}
         self.field_types = {(e.name, n): t for e in module.entities for n, t in e.fields}
         self.field_labels: dict[tuple[str, str], str] = {}
+        self.constants = {constant.name for constant in module.constants}
         if language != "ko":
             self.value_labels: dict[tuple[str, str], str] = {}
             return
@@ -30,6 +31,9 @@ class Names:
         for term in module.terms:
             if term.label:
                 self.labels[term.name] = term.label
+        for constant in module.constants:
+            if constant.label:
+                self.labels[constant.name] = constant.label
         for derivation in module.derivations:
             if derivation.label:
                 self.labels[derivation.name] = derivation.label
@@ -58,7 +62,7 @@ class Names:
         return label or self.show(type_name)
 
     def value(self, variable: str, value: str) -> str:
-        return self.value_labels.get((variable, value)) or value
+        return self.value_labels.get((variable, value)) or (self.show(value) if value in self.constants else value)
 
 
 def has_final_consonant(text: str) -> bool:
@@ -75,6 +79,13 @@ def attach(text: str, with_consonant: str, without_consonant: str) -> str:
 
 PRECEDENCE = {Implies: 1, Or: 2, And: 3}
 SYMBOLS = {"!=": "≠", "<=": "≤", ">=": "≥"}
+KOREAN_ORDERINGS = {
+    "<": ("보다 작을 때", "보다 작고"),
+    "<=": (" 이하일 때", " 이하이고"),
+    ">": ("보다 클 때", "보다 크고"),
+    ">=": (" 이상일 때", " 이상이고"),
+}
+ENGLISH_ORDERINGS = {"<": "less than", "<=": "at most", ">": "greater than", ">=": "at least"}
 
 
 def formula_text(formula: Formula, parent: int = 0) -> str:
@@ -117,6 +128,11 @@ def korean_condition(conditions: list[Formula], names: Names) -> str:
             subject = attach(names.show(condition.left), "이", "가")
             shown = names.value(condition.left, condition.right)
             phrases.append(f"{subject} '{shown}'" + ("일 때" if last else "이고"))
+        elif isinstance(condition, Atom) and "." not in condition.left + condition.right:
+            subject = attach(names.show(condition.left), "이", "가")
+            shown = names.value(condition.left, condition.right)
+            closing, joining = KOREAN_ORDERINGS[condition.operator]
+            phrases.append(f"{subject} '{shown}'" + (closing if last else joining))
         else:
             phrases.append(f"`{formula_text(condition)}` 조건이 " + ("성립할 때" if last else "성립하고"))
     return " ".join(phrases)
@@ -131,6 +147,9 @@ def english_condition(conditions: list[Formula], names: Names) -> str:
             parts.append(f"{names.show(condition.left)} is not {condition.right}")
         elif isinstance(condition, Atom) and condition.operator == "=":
             parts.append(f"{names.show(condition.left)} is {names.value(condition.left, condition.right)}")
+        elif isinstance(condition, Atom) and "." not in condition.left + condition.right:
+            relation = ENGLISH_ORDERINGS[condition.operator]
+            parts.append(f"{names.show(condition.left)} is {relation} {names.value(condition.left, condition.right)}")
         else:
             parts.append(f"`{formula_text(condition)}` holds")
     return " and ".join(parts)

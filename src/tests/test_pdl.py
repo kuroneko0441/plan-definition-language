@@ -986,7 +986,10 @@ class ConstantTest(unittest.TestCase):
         self.assertEqual([f.kind for f in findings], ["UNVERIFIED"])
         document = render(module, findings)
         self.assertIn("- 잠금 횟수: 1 ~ 4 (가정: 잠금 횟수)", document)
-        self.assertIn("(0 ~ limit)", document)
+        self.assertIn("(0 ~ 잠금 횟수)", document)
+        self.assertIn("'Active' 상태에서 Tries가 '잠금 횟수'보다 작을 때 'Fail'가 일어나면", document)
+        self.assertIn("'Active' 상태에서 Tries가 '잠금 횟수'일 때 'Fail'가 일어나면", document)
+        self.assertIn("In Active when Tries is less than limit, Fail moves to Active.", render(module, findings, "en"))
 
 
 class SolverTest(unittest.TestCase):

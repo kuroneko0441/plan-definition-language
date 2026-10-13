@@ -508,6 +508,17 @@ def reachable_from(start: str, edges: dict[str, set[str]]) -> set[str]:
     return seen
 
 
+def transition_outcome(transition: Transition) -> tuple:
+    changes: dict[str, list[tuple[str, int]]] = {}
+    for counter, operator, amount in transition.effects:
+        changes.setdefault(counter, []).append((operator, amount))
+    return transition.target, tuple(sorted((counter, tuple(steps)) for counter, steps in changes.items()))
+
+
+def agrees(world: dict[str, str], assignment: dict[str, str]) -> bool:
+    return all(assignment.get(variable, value) == value for variable, value in world.items())
+
+
 def check_guards(
     machine: Machine,
     grouped: dict[tuple[str, str], list[Transition]],
@@ -533,6 +544,8 @@ def check_guards(
                 findings.append(
                     Finding("CONTRADICTION", f"{label} leads to {', '.join(sorted(destinations))}", line)
                 )
+            elif len({transition_outcome(transition) for transition in group}) > 1:
+                findings.append(Finding("CONTRADICTION", f"{label} changes the counters in different ways", line))
             continue
         variables = {
             condition.variable
@@ -549,7 +562,7 @@ def check_guards(
         for assignment in assignments:
             applicable = [t for t in group if all(condition_holds(c, assignment) for c in t.conditions)]
             applicable_held = [h for h in held if all(condition_holds(c, assignment) for c in h.conditions)]
-            if len({t.target for t in applicable}) > 1 or (applicable and applicable_held):
+            if len({transition_outcome(t) for t in applicable}) > 1 or (applicable and applicable_held):
                 conflicts.append(assignment)
             elif not applicable and not applicable_held and (state, event) not in else_covered:
                 gaps.append(assignment)
@@ -625,7 +638,7 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
         for condition in handling.conditions:
             findings.extend(check_condition(condition, index, handling.line))
         pairs = (
-            [(state, handling.event) for state in states]
+            [(state, handling.event) for state in machine.states]
             if handling.state == "*"
             else [(handling.state, handling.event)]
         )
@@ -706,7 +719,12 @@ def check_system(module: Module, index: Index) -> list[Finding]:
         for condition in transition.conditions
     )
     watched = [formula for formula, enums in index.invariant_terms if enums and enums <= interesting]
-    if not machines or not (counters or guarded or watched):
+    mixed = [
+        (formula, enums)
+        for formula, enums in index.invariant_terms
+        if enums & interesting and not enums <= interesting
+    ]
+    if not machines or not (counters or guarded or watched or mixed):
         return []
     counter_order = [counter for _, counter in counters]
     limits = {counter: machine.counters[counter] for machine in machines for counter in machine.counters}
@@ -717,6 +735,49 @@ def check_system(module: Module, index: Index) -> list[Finding]:
     findings: list[Finding] = []
     reported_overflow: set[tuple[str, int]] = set()
     violated: set[int] = set()
+    broken: set[int] = set()
+    behind: dict[tuple, list[tuple]] = {}
+    known_worlds: dict[frozenset[str], list[dict[str, str]] | None] = {}
+    scopes: dict[int, list[dict[str, str]]] = {}
+    for machine in machines:
+        for transition in machine.transitions:
+            changed = {machine.name, *(counter for counter, _, _ in transition.effects)}
+            variables = {
+                condition.variable
+                for condition in transition.conditions
+                if condition.variable in index.enums and condition.variable not in interesting
+            }
+            for _, enums in mixed:
+                if enums & changed:
+                    variables |= enums - interesting
+            key = frozenset(variables)
+            if key not in known_worlds:
+                known_worlds[key] = worlds(index, variables) if variables else [{}]
+            scope = known_worlds[key]
+            if scope is None:
+                findings.append(
+                    Finding(
+                        "TOO_LARGE",
+                        f"{transition.source} -> {transition.target} on {transition.event} of {machine.name}"
+                        " has too many enum combinations to check against the invariants",
+                        transition.line,
+                    )
+                )
+                scope = [{}]
+            scopes[id(transition)] = scope
+    start = {machine.name: machine.initial for machine in machines}
+    start.update({counter: "0" for counter in counter_order})
+    for _, enums in mixed:
+        scope = worlds(index, enums - interesting)
+        if scope is not None and not any(agrees(world, start) for world in scope):
+            findings.append(
+                Finding(
+                    "INVARIANT_VIOLATED",
+                    f"no enum values satisfy the invariants at the start ({describe(start)})",
+                    module.invariants[0].line if module.invariants else module.exclusions[0].line,
+                )
+            )
+            break
 
     def describe_path(config: tuple) -> str:
         path = []
@@ -745,11 +806,16 @@ def check_system(module: Module, index: Index) -> list[Finding]:
             for transition in machine.transitions:
                 if transition.source != states[number]:
                     continue
-                if not all(
-                    condition_holds(condition, assignment)
-                    for condition in transition.conditions
-                    if condition.variable in interesting
-                ):
+                enabling = [
+                    world
+                    for world in ({**scope, **assignment} for scope in scopes[id(transition)] if agrees(scope, assignment))
+                    if all(
+                        condition_holds(condition, world)
+                        for condition in transition.conditions
+                        if condition.variable in world
+                    )
+                ]
+                if not enabling:
                     continue
                 new_values = list(values)
                 overflow = False
@@ -779,6 +845,27 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                 new_states = list(states)
                 new_states[number] = transition.target
                 successor = (tuple(new_states), tuple(new_values))
+                behind.setdefault(successor, []).append(config)
+                after = {machine.name: transition.target}
+                after.update({counter: str(value) for counter, value in zip(counter_order, new_values)})
+                step = f"{machine.name}: {transition.event}"
+                for position, (formula, enums) in enumerate(mixed):
+                    if position in broken:
+                        continue
+                    for world in enabling:
+                        result = {**world, **after}
+                        if enums <= result.keys() and not evaluate(formula, result, {}, index):
+                            broken.add(position)
+                            path = step if seen[config] is None else f"{describe_path(config)} -> {step}"
+                            findings.append(
+                                Finding(
+                                    "INVARIANT_VIOLATED",
+                                    f"an invariant over machine states and enum values fails after: {path}"
+                                    f" ({describe(result)})",
+                                    transition.line,
+                                )
+                            )
+                            break
                 if successor not in seen:
                     seen[successor] = config
                     steps[successor] = f"{machine.name}: {transition.event}"
@@ -787,14 +874,39 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                         return findings + [Finding("TOO_LARGE", "the combined state space is too large to explore", 0)]
     for number, machine in enumerate(machines):
         forward: dict[str, set[str]] = {}
+        backward: dict[str, set[str]] = {}
         for transition in machine.transitions:
             forward.setdefault(transition.source, set()).add(transition.target)
+            backward.setdefault(transition.target, set()).add(transition.source)
         statically = reachable_from(machine.initial, forward)
         reached = {config[0][number] for config in seen}
         for state in machine.states:
             if state in statically and state not in reached:
                 findings.append(
                     Finding("UNREACHABLE", f"state {state} of {machine.name} is never reached once guards and counters are applied", machine.line)
+                )
+        goals = {machine.initial} if machine.cyclic else set(machine.terminals)
+        finishing = {config for config in seen if config[0][number] in goals}
+        if not finishing:
+            continue
+        queue = deque(finishing)
+        while queue:
+            for previous in behind.get(queue.popleft(), ()):
+                if previous not in finishing:
+                    finishing.add(previous)
+                    queue.append(previous)
+        statically_finishing = set().union(*(reachable_from(goal, backward) for goal in goals))
+        aim = "return to the initial state" if machine.cyclic else "reach a terminal state"
+        for state in machine.states:
+            stuck = next((c for c in seen if c[0][number] == state and c not in finishing), None)
+            if state in statically_finishing and stuck is not None:
+                findings.append(
+                    Finding(
+                        "TRAP",
+                        f"state {state} of {machine.name} cannot {aim} once guards and counters are applied"
+                        f" after: {describe_path(stuck)}",
+                        machine.line,
+                    )
                 )
     return findings
 

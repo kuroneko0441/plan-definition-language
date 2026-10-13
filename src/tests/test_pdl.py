@@ -600,7 +600,7 @@ class CapabilityTest(unittest.TestCase):
         text = CROSS_MACHINES.replace(
             "Open -> Done on Finish by Ext", "Open -> Done on Finish when P = Ok by Ext\nignore Open on Finish"
         ).replace("Ok -> Bad on Fail by Ext\nignore Bad", "Ok -> Bad on Fail when T = Open by Ext\nignore Ok on Fail\nignore Bad")
-        self.assertEqual(blocking_kinds(text), Counter())
+        self.assertEqual(blocking_kinds(text), Counter({"TRAP": 2}))
 
     def test_a_state_that_a_guard_makes_unreachable_is_reported(self):
         text = (
@@ -659,12 +659,12 @@ class JointScenarioTest(unittest.TestCase):
         return blocking_kinds(GUARDED_PAIR + scenario + "\n")
 
     def test_events_on_two_machines_follow_each_others_guards(self):
-        self.assertEqual(self.kinds("scenario s together { start P = Ok, T = Open events P.Fail, T.Finish expect P = Bad, T = Open }"), Counter())
-        self.assertEqual(self.kinds("scenario s together { start P = Ok, T = Open events T.Finish, P.Fail expect P = Ok, T = Done }"), Counter())
+        self.assertEqual(self.kinds("scenario s together { start P = Ok, T = Open events P.Fail, T.Finish expect P = Bad, T = Open }"), Counter({"TRAP": 2}))
+        self.assertEqual(self.kinds("scenario s together { start P = Ok, T = Open events T.Finish, P.Fail expect P = Ok, T = Done }"), Counter({"TRAP": 2}))
 
     def test_a_wrong_end_state_fails_the_scenario(self):
         text = "scenario s together { start P = Bad, T = Open events T.Finish expect P = Bad, T = Done }"
-        self.assertEqual(self.kinds(text), Counter({"SCENARIO_FAILED": 1}))
+        self.assertEqual(self.kinds(text), Counter({"TRAP": 2, "SCENARIO_FAILED": 1}))
 
     def test_unknown_machines_states_and_events_are_undefined(self):
         self.assertEqual(self.kinds("scenario s together { start Q = Ok events Q.Fail expect Q = Ok }")["UNDEFINED"], 1)
@@ -676,6 +676,70 @@ class JointScenarioTest(unittest.TestCase):
         document = render(module, check(module), "en")
         self.assertIn("- Start: P = Ok, T = Open", document)
         self.assertIn("- Event sequence: P: Fail", document)
+
+
+FLAGGED = (
+    "module m\nexternal Ext\nenum Flag = On | Off\n"
+    "machine M { states A, B\ninitial A\nterminal B\nevent Go\n"
+    "A -> B on Go when Flag = On by Ext\nreject A on Go\nreject B on Go }\n"
+)
+
+
+class SystemSemanticsTest(unittest.TestCase):
+    def test_findings_follow_the_declared_state_order(self):
+        text = (
+            "module m\nexternal Ext\nenum Flag = On | Off\n"
+            "machine M { states S1, S2, S3, S4, S5, S6\ninitial S1\nterminal S6\nevent Go, Ping\n"
+            "S1 -> S2 on Go by Ext\nS2 -> S3 on Go by Ext\nS3 -> S4 on Go by Ext\n"
+            "S4 -> S5 on Go by Ext\nS5 -> S6 on Go by Ext\nreject S6 on Go\n"
+            "ignore * on Ping when Flag = On }\n"
+        )
+        states = [f.message.split()[0] for f in check(parse_module(text)) if f.kind == "UNCOVERED"]
+        self.assertEqual(states, ["S1", "S2", "S3", "S4", "S5", "S6"])
+
+    def test_transitions_that_change_a_counter_differently_contradict(self):
+        machine = (
+            "module m\nexternal Ext\n"
+            "machine M { counter N max 3\nstates A, B\ninitial A\nterminal B\nevent Go, Inc\n"
+            "%s\nA -> B on Go by Ext\nreject B on Go\nreject B on Inc }\n"
+        )
+        guarded = "A -> A on Inc when N = 0 then N + 1 by Ext\nA -> A on Inc when N = 0 then N + 3 by Ext\nreject A on Inc"
+        self.assertEqual(blocking_kinds(machine % guarded), Counter({"CONTRADICTION": 1}))
+        unguarded = "A -> A on Inc then N = 1 by Ext\nA -> A on Inc then N = 2 by Ext"
+        self.assertEqual(blocking_kinds(machine % unguarded), Counter({"CONTRADICTION": 1}))
+        same = "A -> A on Inc then N = 1 by Ext\nA -> A on Inc then N = 1 by Ext"
+        self.assertEqual(blocking_kinds(machine % same), Counter())
+
+    def test_a_state_that_a_guard_keeps_from_finishing_is_a_trap(self):
+        text = (
+            "module m\nexternal Ext\n"
+            "machine M { counter N max 1\nstates A, B, C\ninitial A\nterminal C\nevent Go, Skip\n"
+            "A -> B on Go by Ext\nA -> C on Skip by Ext\nB -> C on Go when N = 1 by Ext\n"
+            "reject B on Go\nreject B on Skip\nreject C on Go\nreject C on Skip }\n"
+        )
+        findings = [f for f in check(parse_module(text)) if f.blocking]
+        self.assertEqual([f.kind for f in findings], ["TRAP"])
+        self.assertIn("state B of M cannot reach a terminal state", findings[0].message)
+        self.assertIn("after: M: Go", findings[0].message)
+
+    def test_a_transition_must_keep_an_invariant_that_reads_an_enum(self):
+        findings = [f for f in check(parse_module(FLAGGED + "invariant i: Flag = On => M = A\n")) if f.blocking]
+        self.assertEqual([f.kind for f in findings], ["INVARIANT_VIOLATED"])
+        self.assertIn("after: M: Go (Flag=On, M=B)", findings[0].message)
+
+    def test_a_guard_that_keeps_the_enum_invariant_passes(self):
+        self.assertEqual(blocking_kinds(FLAGGED + "invariant i: M = B => Flag = On\n"), Counter())
+
+    def test_an_invariant_removes_the_enum_values_that_enable_a_transition(self):
+        counts = blocking_kinds(FLAGGED + "invariant i: M = A => Flag = Off\n")
+        self.assertEqual(counts["UNREACHABLE"], 1)
+        self.assertEqual(counts["INVARIANT_VIOLATED"], 0)
+
+    def test_invariants_that_no_enum_value_satisfies_at_the_start_are_reported(self):
+        text = FLAGGED + "invariant i: M = A => Flag = On\ninvariant j: M = A => Flag = Off\n"
+        messages = [f.message for f in check(parse_module(text)) if f.kind == "INVARIANT_VIOLATED"]
+        self.assertEqual(len(messages), 1)
+        self.assertIn("at the start", messages[0])
 
 
 class ConsistencyTest(unittest.TestCase):

@@ -7,7 +7,17 @@ from pdl.checks import check
 from pdl.cli import check_consistency
 from pdl.project import compare
 from pdl.render import render
-from pdl.syntax import PdlSyntaxError, parse_module
+from pdl import legacy, syntax
+from pdl.format import to_text
+from pdl.syntax import PdlSyntaxError
+
+
+def modern(text: str, source: Path | None = None) -> str:
+    return to_text(legacy.parse_module(text, source), imports=False)
+
+
+def parse_module(text: str, source: Path | None = None):
+    return syntax.parse_module(modern(text, source))
 
 LIBRARY = """
 module library label "도서관 대출 규칙"
@@ -457,7 +467,7 @@ class ExtensionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = TempPath(directory)
             source = root / "small_library.pdl"
-            source.write_text(UNCOVERED_LIBRARY, encoding="utf-8")
+            source.write_text(modern(UNCOVERED_LIBRARY), encoding="utf-8")
             output = root / "build"
             self.assertFalse(build_file(source, output, "ko"))
             self.assertFalse(output.exists())
@@ -476,7 +486,7 @@ class ExtensionTest(unittest.TestCase):
             root = TempPath(directory)
             for number, text in enumerate((LIBRARY, UNCOVERED_LIBRARY, GUARDED_IGNORE, COUNTER_MACHINE, CROSS_MACHINES)):
                 source = root / f"module{number}.pdl"
-                source.write_text(text, encoding="utf-8")
+                source.write_text(modern(text), encoding="utf-8")
                 build_file(source, root / "build", "ko", draft=True)
 
 
@@ -1071,6 +1081,170 @@ def assertion_text(assertion) -> str:
     return formula_text(assertion.formula)
 
 
+BOOKING = """
+module booking
+
+actor Customer, Staff
+external Gateway
+
+Booking : {Requested, Confirmed, Cancelled} init Requested final {Confirmed, Cancelled}
+Payment : {Unpaid, Paid, Refunded, Void} init Unpaid final {Paid, Refunded, Void}
+
+Booking.Confirm @Staff {
+    Booking = Requested & Payment = Paid => Booking' = Confirmed
+    else reject as unpaid
+}
+Booking.Cancel @Customer {
+    Booking in {Requested, Confirmed} => Booking' = Cancelled
+    else reject
+}
+Payment.Pay @Gateway {
+    Payment = Unpaid & Booking = Requested => Payment' = Paid
+    else reject
+}
+Payment.Refund @Staff {
+    Payment = Paid & Booking = Cancelled => Payment' = Refunded
+    else reject
+}
+Payment.Close @Staff {
+    Payment = Unpaid & Booking = Cancelled => Payment' = Void
+    else reject
+}
+
+inv confirmed_is_paid: Booking = Confirmed => Payment = Paid
+prop refund_is_possible: always Booking = Cancelled & Payment = Paid => can Payment = Refunded
+run pay_then_cancel: Booking = Requested & Payment = Unpaid
+    -> Payment.Pay, Booking.Confirm, Booking.Cancel, Payment.Refund
+    -> Booking = Cancelled & Payment = Refunded
+
+text {
+    module "예약과 결제"
+    Booking "예약"
+    Booking.Requested "요청됨"
+    Booking.Confirm "확정"
+    Booking.Confirm.unpaid why "결제 전에는 확정하지 않는다."
+    Staff "직원"
+    confirmed_is_paid why "확정된 예약은 결제가 끝난 예약이다."
+}
+"""
+
+
+def document_lines(module) -> list[str]:
+    lines = render(module, check(module), "en").splitlines()
+    return sorted(line for line in lines if line and "exclusive" not in line and line != "## Premises")
+
+
+class SyntaxTest(unittest.TestCase):
+    def kinds(self, text: str) -> Counter:
+        return Counter(f.kind for f in check(syntax.parse_module(text)) if f.blocking)
+
+    def test_a_module_of_relations_builds(self):
+        self.assertEqual(self.kinds(BOOKING), Counter())
+
+    def test_a_missing_guard_breaks_the_invariant(self):
+        text = BOOKING.replace("Booking = Requested & Payment = Paid =>", "Booking = Requested =>")
+        self.assertEqual(self.kinds(text)["INVARIANT_VIOLATED"], 1)
+
+    def test_else_covers_the_states_that_no_clause_names(self):
+        text = BOOKING.replace("    Payment = Paid & Booking = Cancelled => Payment' = Refunded\n    else reject", "    Payment = Paid & Booking = Cancelled => Payment' = Refunded")
+        counts = self.kinds(text)
+        self.assertEqual(counts["UNHANDLED"], 3)
+        self.assertEqual(counts["UNCOVERED"], 1)
+
+    def test_a_clause_names_its_source_states_as_a_set(self):
+        module = syntax.parse_module(BOOKING)
+        cancel = [(t.source, t.target) for t in module.machines[0].transitions if t.event == "Cancel"]
+        self.assertEqual(cancel, [("Requested", "Cancelled"), ("Confirmed", "Cancelled")])
+        other = syntax.parse_module(BOOKING.replace("Booking in {Requested, Confirmed} =>", "Booking != Cancelled =>"))
+        self.assertEqual([(t.source, t.target) for t in other.machines[0].transitions if t.event == "Cancel"], cancel)
+
+    def test_a_counter_is_updated_through_its_next_value(self):
+        text = (
+            "module m\nexternal Sys\nconst limit : 1..3\n"
+            "Login : {Active, Locked} init Active final {Locked}\nLogin.Tries : 0..limit\n"
+            "Login.Fail @Sys {\n  Login = Active & Tries < limit => Tries' = Tries + 1\n"
+            "  Login = Active & Tries = limit => Login' = Locked & Tries' = 0\n  else reject\n}\n"
+            "prop a: always Login = Locked => Tries = 0\n"
+            "run two: Login = Active & limit = 1 -> Fail, Fail -> Login = Locked\n"
+        )
+        self.assertEqual(self.kinds(text), Counter())
+        with self.assertRaises(PdlSyntaxError):
+            syntax.parse_module(text.replace("Tries' = Tries + 1", "Tries' = limit"))
+
+    def test_the_text_block_supplies_the_document_wording(self):
+        module = syntax.parse_module(BOOKING)
+        document = render(module, check(module))
+        self.assertIn("# 예약과 결제", document)
+        self.assertIn("## 업무 흐름: 예약", document)
+        self.assertIn("'요청됨' 상태에서 Payment가 'Paid'일 때 '확정'이 일어나면 'Confirmed' 상태가 된다. (주체: 직원)", document)
+        self.assertIn("근거: 결제 전에는 확정하지 않는다.", document)
+        with self.assertRaises(PdlSyntaxError) as raised:
+            syntax.parse_module(BOOKING.replace('Staff "직원"', 'Stuff "직원"'))
+        self.assertIn("Stuff, which is not defined", str(raised.exception))
+
+    def test_symbols_are_aliases_of_the_operators(self):
+        text = BOOKING.replace(" & ", " ∧ ").replace(" => ", " ⇒ ").replace(" in {", " ∈ {").replace("->", "→")
+        self.assertEqual(self.kinds(text), Counter())
+        quantified = "module m\nS : {A, B}\nassume a: ∀ v ∈ S: ¬(S = v) ∨ S ≠ B\nprop p: always (some v in S: S = v)\n"
+        self.assertEqual(self.kinds(quantified), Counter())
+
+    def test_the_keyword_syntax_is_rejected(self):
+        for text, line in (("module m\nenum S = A | B\n", 2), ("module m\nS : {A}\ninvariant i: S = A\n", 3)):
+            with self.assertRaises(PdlSyntaxError) as raised:
+                syntax.parse_module(text)
+            self.assertEqual(raised.exception.line, line)
+        with self.assertRaises(PdlSyntaxError):
+            syntax.parse_module("module m\nS : {A, B}\nassume a: S = A and S = B\n")
+
+    def test_a_run_is_single_or_joint(self):
+        single = BOOKING + "run cancel: Booking = Requested -> Cancel -> Booking = Cancelled\n"
+        self.assertEqual(self.kinds(single), Counter())
+        wrong = BOOKING + "run cancel: Booking = Requested -> Cancel -> Booking = Confirmed\n"
+        self.assertEqual(self.kinds(wrong), Counter({"SCENARIO_FAILED": 1}))
+        with self.assertRaises(PdlSyntaxError):
+            syntax.parse_module(BOOKING + "run bad: Booking = Requested -> Cancel, Payment.Pay -> Booking = Cancelled\n")
+
+    def test_an_event_names_a_defined_machine(self):
+        with self.assertRaises(PdlSyntaxError):
+            syntax.parse_module("module m\nGhost.Go { else reject }\n")
+
+    def test_an_import_reads_the_current_syntax(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "common.pdl").write_text('module common\nS : {On, Off}\nactor X\ntext { S "스위치" }\n', encoding="utf-8")
+            text = 'module m\nimport "common.pdl"\naction Do\nR {}\npermit X Do R: S = On\nforbid X Do R: S = Off\n'
+            module = syntax.parse_module(text, root / "m.pdl")
+            self.assertEqual([f for f in check(module) if f.blocking], [])
+            self.assertEqual(module.enums[0].label, "스위치")
+
+    def test_conversion_keeps_the_findings_and_the_document(self):
+        for text in SolverTest.texts:
+            before = legacy.parse_module(text)
+            after = syntax.parse_module(to_text(before, imports=False))
+            self.assertEqual(
+                Counter(f.kind for f in check(after)), Counter(f.kind for f in check(before)), text[:60]
+            )
+            self.assertEqual(document_lines(after), document_lines(before), text[:60])
+            self.assertEqual(to_text(after, imports=False), to_text(before, imports=False), text[:60])
+
+    def test_the_convert_command_rewrites_a_keyword_module(self):
+        import contextlib
+        import io
+        import tempfile
+
+        from pdl.cli import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "old.pdl").write_text(COVERED_MACHINE, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["convert", str(root / "old.pdl"), "--output", str(root / "new")]), 0)
+                self.assertEqual(main(["build", str(root / "new" / "old.pdl"), "--output", str(root / "build")]), 0)
+            self.assertIn("M.Go @Ext {", (root / "new" / "old.pdl").read_text(encoding="utf-8"))
+
+
 class ConsistencyTest(unittest.TestCase):
     def kinds(self, *texts: str) -> Counter:
         modules = [(Path(f"m{number}.pdl"), parse_module(text)) for number, text in enumerate(texts)]
@@ -1113,8 +1287,8 @@ class ConsistencyTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "a.pdl").write_text("module a\nenum S = On | Off\n", encoding="utf-8")
-            (root / "b.pdl").write_text("module b\nenum S = On\n", encoding="utf-8")
+            (root / "a.pdl").write_text("module a\nS : {On, Off}\n", encoding="utf-8")
+            (root / "b.pdl").write_text("module b\nS : {On}\n", encoding="utf-8")
             with redirect_stdout(StringIO()) as output:
                 clean = check_consistency([root])
             self.assertFalse(clean)

@@ -3,7 +3,9 @@
 import argparse
 from pathlib import Path
 
+from . import legacy
 from .checks import check
+from .format import to_text
 from .project import compare
 from .render import render
 from .syntax import PdlSyntaxError, parse_module
@@ -55,9 +57,22 @@ def check_consistency(paths: list[Path]) -> bool:
     return clean and not any(finding.blocking for finding in findings)
 
 
+def convert_file(path: Path, output_directory: Path) -> bool:
+    try:
+        module = legacy.Parser(legacy.tokenize(path.read_text(encoding="utf-8"))).module()
+    except PdlSyntaxError as error:
+        print(f"{path}: SYNTAX {error}")
+        return False
+    output_directory.mkdir(parents=True, exist_ok=True)
+    target = output_directory / path.name
+    target.write_text(to_text(module), encoding="utf-8")
+    print(f"{module.name}: converted to {target}")
+    return True
+
+
 def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pdl")
-    parser.add_argument("command", choices=["build", "consistency"])
+    parser.add_argument("command", choices=["build", "consistency", "convert"])
     parser.add_argument("paths", nargs="+", type=Path)
     parser.add_argument("--output", type=Path, default=Path("build"))
     parser.add_argument("--language", choices=["ko", "en"], default="ko")
@@ -65,5 +80,7 @@ def main(arguments: list[str] | None = None) -> int:
     options = parser.parse_args(arguments)
     if options.command == "consistency":
         return 0 if check_consistency(options.paths) else 1
+    if options.command == "convert":
+        return 0 if all([convert_file(path, options.output) for path in expand(options.paths)]) else 1
     results = [build_file(path, options.output, options.language, options.draft) for path in options.paths]
     return 0 if all(results) else 1

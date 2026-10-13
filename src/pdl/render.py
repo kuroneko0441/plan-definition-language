@@ -395,6 +395,11 @@ def render_machines(
         for kind, events in otherwise.items():
             note = assumption_text(otherwise_assumes[kind], module, labels)
             lines.append(f"- {labels['otherwise']} {labels[kind]}: {', '.join(events)}{note}")
+            lines += [
+                f"  - {labels['why']}: {handling.why}"
+                for handling in machine.handlings
+                if handling.kind == kind and handling.state == "*" and not handling.conditions and handling.why
+            ]
         lines.append("")
     for scenario in module.scenarios:
         machine = machines.get(scenario.machine)

@@ -1,6 +1,7 @@
 """Tokenizer and parser for plan definition language source text."""
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
@@ -15,7 +16,6 @@ from .model import (
     Derivation,
     EntityDefinition,
     EnumDefinition,
-    Exclusion,
     Exists,
     ForAll,
     Formula,
@@ -23,6 +23,7 @@ from .model import (
     Implies,
     InSet,
     Invariant,
+    JointScenario,
     Law,
     Machine,
     Module,
@@ -31,7 +32,6 @@ from .model import (
     Premise,
     Reference,
     Rule,
-    JointScenario,
     Scenario,
     Screen,
     Term,
@@ -44,12 +44,15 @@ TOKEN_PATTERN = re.compile(
     r"(?P<space>\s+)"
     r"|(?P<comment>#[^\n]*)"
     r"|(?P<string>\"(?:[^\"\\]|\\.)*\")"
-    r"|(?P<symbol>->|→|<=|>=|≤|≥|=>|⇒|!=|≠|∧|∨|¬|∀|∃|∈|[{}(),:=|*<>.;?+])"
+    r"|(?P<symbol>->|→|<=|>=|≤|≥|=>|⇒|!=|≠|\.\.|∧|∨|¬|∀|∃|∈|[{}(),:=|*<>.;?+&!@'])"
     r"|(?P<word>\w+)"
 )
-SYMBOL_ALIASES = {"→": "->", "≤": "<=", "≥": ">=", "⇒": "=>", "≠": "!="}
-WORD_ALIASES = {"∧": "and", "∨": "or", "¬": "not", "∀": "forall", "∃": "exists", "∈": "in"}
-COMPARISON_OPERATORS = ("=", "<", ">", "<=", ">=")
+SYMBOL_ALIASES = {"→": "->", "≤": "<=", "≥": ">=", "⇒": "=>", "≠": "!=", "∧": "&", "∨": "|", "¬": "!"}
+WORD_ALIASES = {"∀": "all", "∃": "some", "∈": "in"}
+COMPARISON_OPERATORS = ("=", "!=", "<", "<=", ">", ">=")
+LAW_OPERATORS = ("=", "<", ">", "<=", ">=")
+TEXT_ATTRIBUTES = ("why", "stored", "after", "mixed")
+IMPORTED_KINDS = ("enum", "entity", "term", "actor", "action", "external")
 
 
 class PdlSyntaxError(Exception):
@@ -62,6 +65,43 @@ class Token(NamedTuple):
     kind: str
     value: str
     line: int
+
+
+@dataclass
+class Clause:
+    line: int
+    guard: list[Formula]
+    kind: str
+    target: str = ""
+    effects: list[tuple[str, str, int]] = field(default_factory=list)
+    actors: list[str] | None = None
+    assumes: list[str] = field(default_factory=list)
+    tag: str = ""
+
+
+@dataclass
+class Block:
+    line: int
+    machine: str
+    event: str
+    actors: list[str]
+    clauses: list[Clause]
+
+
+@dataclass
+class Run:
+    line: int
+    name: str
+    start: list[Formula]
+    events: list[tuple[str, str]]
+    expect: list[Formula]
+
+
+@dataclass
+class TextEntry:
+    line: int
+    key: list[str]
+    attributes: dict[str, str]
 
 
 def tokenize(text: str) -> list[Token]:
@@ -87,11 +127,19 @@ def tokenize(text: str) -> list[Token]:
     return tokens
 
 
+def conjuncts(formula: Formula) -> list[Formula]:
+    return list(formula.operands) if isinstance(formula, And) else [formula]
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
         self.index = 0
         self.temporal = False
+        self.blocks: list[Block] = []
+        self.runs: list[Run] = []
+        self.texts: list[TextEntry] = []
+        self.tags: dict[tuple[str, ...], list] = {}
 
     def peek(self, offset: int = 0) -> Token | None:
         position = self.index + offset
@@ -105,9 +153,12 @@ class Parser:
         self.index += 1
         return token
 
+    def at(self, value: str, offset: int = 0) -> bool:
+        token = self.peek(offset)
+        return token is not None and token.kind != "string" and token.value == value
+
     def accept(self, value: str) -> bool:
-        token = self.peek()
-        if token is not None and token.kind != "string" and token.value == value:
+        if self.at(value):
             self.index += 1
             return True
         return False
@@ -130,6 +181,12 @@ class Parser:
             raise PdlSyntaxError(token.line, f"expected a quoted string but found {token.value!r}")
         return token.value
 
+    def number(self) -> int:
+        token = self.advance()
+        if token.kind != "word" or not token.value.isdigit():
+            raise PdlSyntaxError(token.line, f"expected a number but found {token.value!r}")
+        return int(token.value)
+
     def name_or_star(self) -> str:
         return "*" if self.accept("*") else self.word()
 
@@ -139,26 +196,11 @@ class Parser:
             words.append(self.word())
         return words
 
-    def why(self) -> str:
-        return self.string() if self.accept("why") else ""
-
-    def label(self) -> str:
-        return self.string() if self.accept("label") else ""
-
-    def labeled_words(self) -> list[tuple[str, str]]:
-        items = []
-        while True:
-            word = self.word()
-            following = self.peek()
-            label = self.string() if following is not None and following.kind == "string" else ""
-            items.append((word, label))
-            if not self.accept(","):
-                return items
-
-    def field_type(self) -> str:
-        prefix = "list " if self.accept("list") else ""
-        name = self.word()
-        return prefix + name + ("?" if self.accept("?") else "")
+    def braced_words(self) -> list[str]:
+        self.expect("{")
+        words = [] if self.at("}") else self.comma_words()
+        self.expect("}")
+        return words
 
     def parenthesized_words(self) -> list[str]:
         self.expect("(")
@@ -166,230 +208,14 @@ class Parser:
         self.expect(")")
         return words
 
-    def conditions_after(self, keyword: str) -> list[Formula]:
-        if not self.accept(keyword):
-            return []
-        formula = self.implication()
-        return list(formula.operands) if isinstance(formula, And) else [formula]
-
-    def effects(self) -> list[tuple[str, str, int]]:
-        effects: list[tuple[str, str, int]] = []
-        if self.accept("then"):
-            while True:
-                counter = self.word()
-                token = self.advance()
-                if token.kind == "string" or token.value not in ("+", "="):
-                    raise PdlSyntaxError(token.line, f"expected + or = but found {token.value!r}")
-                effects.append((counter, token.value, int(self.word())))
-                if not self.accept(","):
-                    break
-        return effects
-
     def assumptions(self) -> list[str]:
         return self.comma_words() if self.accept("assuming") else []
 
-    def module(self) -> Module:
-        self.expect("module")
-        module = Module(name=self.word())
-        module.label = self.label()
-        statements = {
-            "import": self.import_statement,
-            "term": self.glossary,
-            "enum": self.enum,
-            "entity": self.entity,
-            "derive": self.derive,
-            "screen": self.screen,
-            "actor": self.declaration,
-            "action": self.declaration,
-            "external": self.declaration,
-            "permit": self.rule,
-            "forbid": self.rule,
-            "exclusive": self.exclusive,
-            "invariant": self.invariant,
-            "assume": self.premise,
-            "assert": self.assertion,
-            "scope": self.scope,
-            "const": self.constant,
-            "machine": self.machine,
-            "scenario": self.scenario,
-            "unknown": self.unknown,
-            "law": self.law,
-        }
-        while (token := self.peek()) is not None:
-            handler = statements.get(token.value) if token.kind == "word" else None
-            if handler is None:
-                raise PdlSyntaxError(token.line, f"unexpected {token.value!r}")
-            handler(module)
-        return module
-
-    def glossary(self, module: Module) -> None:
-        line = self.expect("term").line
-        name = self.word()
-        label = self.label()
-        module.terms.append(TermDefinition(line, name, self.why(), label))
-        module.definitions.append(("term", name, line))
-
-    def enum(self, module: Module) -> None:
-        line = self.expect("enum").line
-        name = self.word()
-        label = self.label()
-        self.expect("=")
-        values: list[str] = []
-        value_labels: dict[str, str] = {}
-        stored: dict[str, str] = {}
-        while True:
-            value = self.word()
-            values.append(value)
-            following = self.peek()
-            if following is not None and following.kind == "string":
-                value_labels[value] = self.string()
-            if self.accept("stored"):
-                stored[value] = self.string()
-            if not self.accept("|"):
-                break
-        module.enums.append(
-            EnumDefinition(line, name, values, self.why(), label, value_labels, stored)
-        )
-        module.definitions.append(("enum", name, line))
-
-    def import_statement(self, module: Module) -> None:
-        line = self.expect("import").line
-        module.imports.append((line, self.string()))
-
-    def entity(self, module: Module) -> None:
-        line = self.expect("entity").line
-        name = self.word()
-        label = self.label()
-        key: list[str] = []
-        if self.accept("key"):
-            self.expect("(")
-            key = self.comma_words()
-            self.expect(")")
-        passive = self.accept("passive")
-        fields: list[tuple[str, str]] = []
-        field_notes: dict[str, str] = {}
-        field_labels: dict[str, str] = {}
-        fixed: list[str] = []
-        if self.accept("{"):
-            while not self.accept("}"):
-                field_name = self.word()
-                self.expect(":")
-                fields.append((field_name, self.field_type()))
-                field_label = self.label()
-                if field_label:
-                    field_labels[field_name] = field_label
-                if self.accept("fixed"):
-                    fixed.append(field_name)
-                note = self.why()
-                if note:
-                    field_notes[field_name] = note
-                self.accept(",")
-        module.entities.append(
-            EntityDefinition(
-                line, name, key, passive, fields, self.why(), label, field_notes, field_labels, fixed
-            )
-        )
-        module.definitions.append(("entity", name, line))
-
-    def derive(self, module: Module) -> None:
-        line = self.expect("derive").line
-        name = self.word()
-        label = self.label()
-        self.expect("of")
-        entity = self.word()
-        self.expect("from")
-        source = self.word()
-        self.expect("mixed")
-        mixed = self.word()
-        following = self.peek()
-        mixed_label = self.string() if following is not None and following.kind == "string" else ""
-        assumes = self.assumptions()
-        module.derivations.append(
-            Derivation(line, name, entity, source, mixed, label, mixed_label, self.why(), assumes)
-        )
-        module.definitions.append(("derive", name, line))
-
-    def shown_item(self) -> str:
-        name = self.word()
-        return f"{name}.{self.word()}" if self.accept(".") else name
-
-    def screen(self, module: Module) -> None:
-        line = self.expect("screen").line
-        name = self.word()
-        label = self.label()
-        self.expect("of")
-        entity = self.word()
-        self.expect("shows")
-        shows = [self.shown_item()]
-        while self.accept(","):
-            shows.append(self.shown_item())
-        assumes = self.assumptions()
-        module.screens.append(Screen(line, name, entity, shows, label, self.why(), assumes))
-        module.definitions.append(("screen", name, line))
-
-    def declaration(self, module: Module) -> None:
-        token = self.advance()
-        while True:
-            name = self.word()
-            declaration = Declaration(token.line, token.value, name, self.label())
-            while token.value == "action":
-                if self.accept("by"):
-                    declaration.performed_by = self.parenthesized_words()
-                elif self.accept("on"):
-                    declaration.applies_to = self.parenthesized_words()
-                else:
-                    break
-            module.declarations.append(declaration)
-            module.definitions.append((token.value, name, token.line))
-            if not self.accept(","):
-                break
-
-    def rule(self, module: Module) -> None:
-        token = self.advance()
-        actor = self.name_or_star()
-        action = self.name_or_star()
-        resource = self.name_or_star()
-        conditions = self.conditions_after("when")
-        requires = self.word() if self.accept("requires") else ""
-        assumes = self.assumptions()
-        module.rules.append(
-            Rule(token.line, token.value, actor, action, resource, conditions, requires, self.why(), assumes)
-        )
-
-    def exclusive(self, module: Module) -> None:
-        line = self.expect("exclusive").line
-        left = self.unary()
-        self.expect(",")
-        module.exclusions.append(Exclusion(line, left, self.unary()))
-
-    def invariant(self, module: Module) -> None:
-        line = self.expect("invariant").line
-        name = self.word()
-        self.expect(":")
-        formula = self.implication()
-        module.invariants.append(Invariant(line, name, formula, self.why()))
-        module.definitions.append(("invariant", name, line))
-
-    def premise(self, module: Module) -> None:
-        line = self.expect("assume").line
-        name = self.word()
-        self.expect(":")
-        formula = self.implication()
-        module.premises.append(Premise(line, name, formula, self.why()))
-        module.definitions.append(("assume", name, line))
-
-    def assertion(self, module: Module) -> None:
-        line = self.expect("assert").line
-        name = self.word()
-        self.expect(":")
-        token = self.advance()
-        if token.kind != "word" or token.value not in ("always", "reachable"):
-            raise PdlSyntaxError(token.line, f"expected always or reachable but found {token.value!r}")
-        self.temporal = True
-        formula = self.implication()
-        self.temporal = False
-        module.assertions.append(Assertion(line, name, token.value, formula, self.why()))
-        module.definitions.append(("assert", name, line))
+    def path(self) -> str:
+        names = [self.word()]
+        while self.accept("."):
+            names.append(self.word())
+        return ".".join(names)
 
     def implication(self) -> Formula:
         premise = self.disjunction()
@@ -399,25 +225,25 @@ class Parser:
 
     def disjunction(self) -> Formula:
         operands = [self.conjunction()]
-        while self.accept("or"):
+        while self.accept("|"):
             operands.append(self.conjunction())
         return operands[0] if len(operands) == 1 else Or(operands)
 
     def conjunction(self) -> Formula:
         operands = [self.unary()]
-        while self.accept("and"):
+        while self.accept("&"):
             operands.append(self.unary())
         return operands[0] if len(operands) == 1 else And(operands)
 
     def unary(self) -> Formula:
-        if self.accept("not"):
+        if self.accept("!"):
             return Not(self.unary())
         token = self.peek()
         if self.temporal and self.accept("can"):
             return Can(self.unary())
         if token is not None and token.kind == "word" and token.value == "can":
-            raise PdlSyntaxError(token.line, "can is allowed only inside assert")
-        for keyword, quantifier in (("forall", ForAll), ("exists", Exists)):
+            raise PdlSyntaxError(token.line, "can is allowed only inside prop")
+        for keyword, quantifier in (("all", ForAll), ("some", Exists)):
             if self.accept(keyword):
                 variable = self.word()
                 self.expect("in")
@@ -430,169 +256,289 @@ class Parser:
             return formula
         left = self.path()
         if self.accept("in"):
-            self.expect("{")
-            values = self.comma_words()
-            self.expect("}")
-            return InSet(left, values)
+            return InSet(left, self.braced_words())
         token = self.advance()
-        if token.kind == "string" or token.value not in ("=", "!=", *COMPARISON_OPERATORS):
+        if token.kind == "string" or token.value not in COMPARISON_OPERATORS:
             raise PdlSyntaxError(token.line, f"expected a comparison or in but found {token.value!r}")
         return Atom(left, token.value, self.path())
 
-    def path(self) -> str:
-        names = [self.word()]
-        while self.accept("."):
-            names.append(self.word())
-        return ".".join(names)
+    def module(self) -> Module:
+        self.expect("module")
+        module = Module(name=self.word())
+        statements = {
+            "import": self.import_statement,
+            "term": self.glossary,
+            "actor": self.declaration,
+            "action": self.declaration,
+            "external": self.declaration,
+            "permit": self.rule,
+            "forbid": self.rule,
+            "assume": self.premise,
+            "inv": self.invariant,
+            "prop": self.assertion,
+            "law": self.law,
+            "derive": self.derive,
+            "screen": self.screen,
+            "run": self.run,
+            "unknown": self.unknown,
+            "scope": self.scope,
+            "const": self.constant,
+            "text": self.text,
+        }
+        while (token := self.peek()) is not None:
+            if token.kind != "word":
+                raise PdlSyntaxError(token.line, f"unexpected {token.value!r}")
+            statements.get(token.value, self.named)(module)
+        self.finish(module)
+        return module
 
-    def number(self) -> int:
+    def named(self, module: Module) -> None:
         token = self.advance()
-        if token.kind != "word" or not token.value.isdigit():
-            raise PdlSyntaxError(token.line, f"expected a number but found {token.value!r}")
-        return int(token.value)
-
-    def constant(self, module: Module) -> None:
-        line = self.expect("const").line
-        name = self.word()
-        self.expect("in")
-        low = self.number()
-        self.expect(".")
-        self.expect(".")
-        high = self.number()
-        if low > high:
-            raise PdlSyntaxError(line, f"the range of {name} is empty")
-        label = self.label()
-        assumes = self.assumptions()
-        module.constants.append(Constant(line, name, low, high, label, self.why(), assumes))
-        module.definitions.append(("const", name, line))
-
-    def scope(self, module: Module) -> None:
-        line = self.expect("scope").line
-        name = self.word()
-        count = self.word()
-        if not count.isdigit():
-            raise PdlSyntaxError(line, f"expected a number of instances but found {count!r}")
-        module.scopes[name] = int(count)
-        module.scope_lines[name] = line
-
-    def machine(self, module: Module) -> None:
-        line = self.expect("machine").line
-        machine = Machine(line, self.word())
+        name = token.value
         if self.accept("of"):
-            machine.entity = self.word()
-        machine.label = self.label()
-        machine.why = self.why()
+            entity = self.word()
+            self.expect(":")
+            self.machine(module, token.line, name, entity)
+        elif self.accept("."):
+            member = self.word()
+            if self.accept(":"):
+                self.counter(module, token.line, name, member)
+            else:
+                self.block(token.line, name, member)
+        elif self.accept(":"):
+            following = self.closing() + 1
+            if self.at("{") and not any(self.at(keyword, following) for keyword in ("init", "final", "cyclic")):
+                values = self.braced_words()
+                module.enums.append(EnumDefinition(token.line, name, values))
+                module.definitions.append(("enum", name, token.line))
+            else:
+                self.machine(module, token.line, name, "")
+        elif self.at("{") or self.at("key") or self.at("passive"):
+            self.entity(module, token.line, name)
+        else:
+            raise PdlSyntaxError(token.line, f"unexpected {name!r}")
+
+    def closing(self) -> int:
+        offset = 0
+        while self.peek(offset) is not None and not self.at("}", offset):
+            offset += 1
+        return offset
+
+    def machine(self, module: Module, line: int, name: str, entity: str) -> None:
+        machine = Machine(line, name, self.braced_words(), entity=entity)
+        if self.accept("init"):
+            machine.initial = self.word()
+        if self.accept("cyclic"):
+            machine.cyclic = True
+        elif self.accept("final"):
+            machine.terminals = self.braced_words()
+        module.machines.append(machine)
+        module.definitions.append(("machine", name, line))
+
+    def counter(self, module: Module, line: int, owner: str, name: str) -> None:
+        low = self.number()
+        if low != 0:
+            raise PdlSyntaxError(line, f"counter {name} must start at 0")
+        self.expect("..")
+        maximum = self.word()
+        machine = next((machine for machine in module.machines if machine.name == owner), None)
+        if machine is None:
+            raise PdlSyntaxError(line, f"counter {name} is declared before its machine {owner}")
+        machine.counters[name] = int(maximum) if maximum.isdigit() else 0
+        if not maximum.isdigit():
+            machine.counter_bounds[name] = maximum
+        module.definitions.append(("counter", name, line))
+
+    def block(self, line: int, machine: str, event: str) -> None:
+        actors = self.comma_words() if self.accept("@") else []
+        self.expect("{")
+        clauses = []
+        while not self.accept("}"):
+            clauses.append(self.clause(machine))
+        self.blocks.append(Block(line, machine, event, actors, clauses))
+
+    def clause(self, machine: str) -> Clause:
+        token = self.peek()
+        if token is None:
+            raise PdlSyntaxError(self.tokens[-1].line, f"an event of {machine} is not closed")
+        if self.accept("else"):
+            clause = Clause(token.line, [], self.outcome())
+            clause.tag = "else"
+        else:
+            guard = [] if self.at("=>") else conjuncts(self.disjunction())
+            self.expect("=>")
+            clause = Clause(token.line, guard, "move")
+            if self.at("reject") or self.at("ignore"):
+                clause.kind = self.outcome()
+            else:
+                self.update(clause, machine)
+                while self.accept("&"):
+                    self.update(clause, machine)
+        if self.accept("@"):
+            clause.actors = self.comma_words()
+        clause.assumes = self.assumptions()
+        if self.accept("as"):
+            clause.tag = self.word()
+        return clause
+
+    def outcome(self) -> str:
+        token = self.advance()
+        if token.kind != "word" or token.value not in ("reject", "ignore"):
+            raise PdlSyntaxError(token.line, f"expected reject or ignore but found {token.value!r}")
+        return token.value
+
+    def update(self, clause: Clause, machine: str) -> None:
+        name = self.word()
+        self.expect("'")
+        self.expect("=")
+        value = self.word()
+        if name == machine:
+            clause.target = value
+        elif self.accept("+"):
+            if value != name:
+                raise PdlSyntaxError(clause.line, f"{name}' must be {name} plus a number")
+            clause.effects.append((name, "+", self.number()))
+        elif value.isdigit():
+            clause.effects.append((name, "=", int(value)))
+        else:
+            raise PdlSyntaxError(clause.line, f"{name}' must be a number or {name} plus a number")
+
+    def entity(self, module: Module, line: int, name: str) -> None:
+        key = self.parenthesized_words() if self.accept("key") else []
+        passive = self.accept("passive")
+        fields: list[tuple[str, str]] = []
+        fixed: list[str] = []
         self.expect("{")
         while not self.accept("}"):
-            token = self.peek()
-            if token is None:
-                raise PdlSyntaxError(line, f"machine {machine.name} is not closed")
-            if token.kind == "word" and token.value == "states":
-                self.advance()
-                for state, state_label in self.labeled_words():
-                    machine.states.append(state)
-                    if state_label:
-                        machine.state_labels[state] = state_label
-            elif token.kind == "word" and token.value == "initial":
-                self.advance()
-                machine.initial = self.word()
-            elif token.kind == "word" and token.value == "terminal":
-                self.advance()
-                machine.terminals += self.comma_words()
-            elif token.kind == "word" and token.value == "event":
-                self.advance()
-                for event, event_label in self.labeled_words():
-                    machine.events.append(event)
-                    if event_label:
-                        machine.event_labels[event] = event_label
-            elif token.kind == "word" and token.value == "cyclic":
-                self.advance()
-                machine.cyclic = True
-            elif token.kind == "word" and token.value == "counter":
-                self.advance()
-                counter = self.word()
-                counter_label = self.string() if self.peek() is not None and self.peek().kind == "string" else ""
-                self.expect("max")
-                maximum = self.word()
-                machine.counters[counter] = int(maximum) if maximum.isdigit() else 0
-                if not maximum.isdigit():
-                    machine.counter_bounds[counter] = maximum
-                if counter_label:
-                    machine.counter_labels[counter] = counter_label
-                module.definitions.append(("counter", counter, token.line))
-            elif token.kind == "word" and token.value in ("ignore", "reject"):
-                self.advance()
-                state = self.name_or_star()
-                self.expect("on")
-                event = self.word()
-                conditions = self.conditions_after("when")
-                assumes = self.assumptions()
-                machine.handlings.append(
-                    Handling(token.line, token.value, state, event, self.why(), assumes, conditions)
-                )
-            else:
-                source = self.word()
-                self.expect("->")
-                target = self.word()
-                self.expect("on")
-                event = self.word()
-                conditions = self.conditions_after("when")
-                effects = self.effects()
-                actors = self.comma_words() if self.accept("by") else []
-                after = self.string() if self.accept("after") else ""
-                assumes = self.assumptions()
-                machine.transitions.append(
-                    Transition(
-                        token.line, source, target, event, actors, self.why(), assumes, conditions, effects, after
-                    )
-                )
-        module.machines.append(machine)
-        module.definitions.append(("machine", machine.name, line))
+            field_name = self.word()
+            self.expect(":")
+            prefix = "list " if self.accept("list") else ""
+            fields.append((field_name, prefix + self.word() + ("?" if self.accept("?") else "")))
+            if self.accept("fixed"):
+                fixed.append(field_name)
+            self.accept(",")
+        module.entities.append(EntityDefinition(line, name, key, passive, fields, fixed=fixed))
+        module.definitions.append(("entity", name, line))
 
-    def scenario(self, module: Module) -> None:
-        line = self.expect("scenario").line
-        name = self.word()
-        if self.accept("together"):
-            self.joint_scenario(module, line, name)
-            return
-        self.expect("on")
-        machine = self.word()
-        self.expect("{")
-        self.expect("start")
-        start = self.word()
-        given = self.conditions_after("given")
-        self.expect("events")
-        events = self.comma_words()
-        self.expect("expect")
-        expect = self.word()
-        self.expect("}")
-        module.scenarios.append(Scenario(line, name, machine, start, events, expect, given))
+    def import_statement(self, module: Module) -> None:
+        line = self.expect("import").line
+        module.imports.append((line, self.string()))
 
-    def machine_states(self) -> dict[str, str]:
-        states: dict[str, str] = {}
+    def glossary(self, module: Module) -> None:
+        line = self.expect("term").line
+        for name in self.comma_words():
+            module.terms.append(TermDefinition(line, name))
+            module.definitions.append(("term", name, line))
+
+    def declaration(self, module: Module) -> None:
+        token = self.advance()
         while True:
-            machine = self.word()
-            self.expect("=")
-            states[machine] = self.word()
-            if not self.accept(","):
-                return states
-
-    def joint_scenario(self, module: Module, line: int, name: str) -> None:
-        self.expect("{")
-        self.expect("start")
-        start = self.machine_states()
-        self.expect("events")
-        events: list[tuple[str, str]] = []
-        while True:
-            machine = self.word()
-            self.expect(".")
-            events.append((machine, self.word()))
+            declaration = Declaration(token.line, token.value, self.word())
+            while token.value == "action":
+                if self.accept("by"):
+                    declaration.performed_by = self.parenthesized_words()
+                elif self.accept("on"):
+                    declaration.applies_to = self.parenthesized_words()
+                else:
+                    break
+            module.declarations.append(declaration)
+            module.definitions.append((token.value, declaration.name, token.line))
             if not self.accept(","):
                 break
-        self.expect("expect")
-        expect = self.machine_states()
-        self.expect("}")
-        module.joint_scenarios.append(JointScenario(line, name, start, events, expect))
+
+    def rule(self, module: Module) -> None:
+        token = self.advance()
+        actor = self.name_or_star()
+        action = self.name_or_star()
+        resource = self.name_or_star()
+        conditions = conjuncts(self.implication()) if self.accept(":") else []
+        requires = self.word() if self.accept("requires") else ""
+        rule = Rule(token.line, token.value, actor, action, resource, conditions, requires, "", self.assumptions())
+        if self.accept("as"):
+            self.tags.setdefault((self.word(),), []).append(rule)
+        module.rules.append(rule)
+
+    def named_formula(self, keyword: str) -> tuple[int, str]:
+        line = self.expect(keyword).line
+        name = self.word()
+        self.expect(":")
+        return line, name
+
+    def premise(self, module: Module) -> None:
+        line, name = self.named_formula("assume")
+        module.premises.append(Premise(line, name, self.implication()))
+        module.definitions.append(("assume", name, line))
+
+    def invariant(self, module: Module) -> None:
+        line, name = self.named_formula("inv")
+        module.invariants.append(Invariant(line, name, self.implication()))
+        module.definitions.append(("invariant", name, line))
+
+    def assertion(self, module: Module) -> None:
+        line, name = self.named_formula("prop")
+        token = self.advance()
+        if token.kind != "word" or token.value not in ("always", "reachable"):
+            raise PdlSyntaxError(token.line, f"expected always or reachable but found {token.value!r}")
+        self.temporal = True
+        formula = self.implication()
+        self.temporal = False
+        module.assertions.append(Assertion(line, name, token.value, formula))
+        module.definitions.append(("assert", name, line))
+
+    def term(self) -> Term:
+        name = self.word()
+        if self.accept("("):
+            argument = self.term()
+            self.expect(")")
+            return Call(name, argument)
+        self.expect(".")
+        return Reference(name, self.word())
+
+    def law(self, module: Module) -> None:
+        line, name = self.named_formula("law")
+        left = self.term()
+        token = self.advance()
+        if token.kind == "string" or token.value not in LAW_OPERATORS:
+            raise PdlSyntaxError(token.line, f"expected a comparison but found {token.value!r}")
+        right = self.term()
+        module.laws.append(Law(line, name, left, token.value, right, "", self.assumptions()))
+
+    def derive(self, module: Module) -> None:
+        line = self.expect("derive").line
+        name = self.word()
+        self.expect("of")
+        entity = self.word()
+        self.expect("from")
+        source = self.word()
+        self.expect("mixed")
+        mixed = self.word()
+        module.derivations.append(Derivation(line, name, entity, source, mixed, assumes=self.assumptions()))
+        module.definitions.append(("derive", name, line))
+
+    def screen(self, module: Module) -> None:
+        line = self.expect("screen").line
+        name = self.word()
+        self.expect("of")
+        entity = self.word()
+        self.expect("shows")
+        shows = [self.path()]
+        while self.accept(","):
+            shows.append(self.path())
+        module.screens.append(Screen(line, name, entity, shows, assumes=self.assumptions()))
+        module.definitions.append(("screen", name, line))
+
+    def run(self, module: Module) -> None:
+        line, name = self.named_formula("run")
+        start = conjuncts(self.conjunction())
+        self.expect("->")
+        events: list[tuple[str, str]] = []
+        while not self.at("->"):
+            first = self.word()
+            events.append((first, self.word()) if self.accept(".") else ("", first))
+            if not self.accept(","):
+                break
+        self.expect("->")
+        self.runs.append(Run(line, name, start, events, conjuncts(self.conjunction())))
 
     def unknown(self, module: Module) -> None:
         line = self.expect("unknown").line
@@ -605,29 +551,168 @@ class Parser:
             attributes[key] = self.advance().value
         module.unknowns.append(Unknown(line, policy, identifier, attributes))
 
-    def term(self) -> Term:
+    def scope(self, module: Module) -> None:
+        line = self.expect("scope").line
         name = self.word()
-        if self.accept("("):
-            argument = self.term()
-            self.expect(")")
-            return Call(name, argument)
-        self.expect(".")
-        return Reference(name, self.word())
+        module.scopes[name] = self.number()
+        module.scope_lines[name] = line
 
-    def law(self, module: Module) -> None:
-        line = self.expect("law").line
-        identifier = self.word()
+    def constant(self, module: Module) -> None:
+        line = self.expect("const").line
+        name = self.word()
         self.expect(":")
-        left = self.term()
-        token = self.advance()
-        if token.value not in COMPARISON_OPERATORS:
-            raise PdlSyntaxError(token.line, f"expected a comparison but found {token.value!r}")
-        right = self.term()
-        assumes = self.assumptions()
-        module.laws.append(Law(line, identifier, left, token.value, right, self.why(), assumes))
+        low = self.number()
+        self.expect("..")
+        high = self.number()
+        if low > high:
+            raise PdlSyntaxError(line, f"the range of {name} is empty")
+        module.constants.append(Constant(line, name, low, high, assumes=self.assumptions()))
+        module.definitions.append(("const", name, line))
 
+    def text(self, module: Module) -> None:
+        self.expect("text")
+        self.expect("{")
+        while not self.accept("}"):
+            token = self.peek()
+            if token is None:
+                raise PdlSyntaxError(self.tokens[-1].line, "the text block is not closed")
+            entry = TextEntry(token.line, self.path().split("."), {})
+            while True:
+                following = self.peek()
+                if following is not None and following.kind == "string":
+                    entry.attributes["label"] = self.string()
+                elif following is not None and following.kind == "word" and following.value in TEXT_ATTRIBUTES:
+                    attribute = self.word()
+                    entry.attributes[attribute] = self.string()
+                else:
+                    break
+            self.texts.append(entry)
 
-IMPORTED_KINDS = ("enum", "entity", "term", "actor", "action", "external")
+    def finish(self, module: Module) -> None:
+        machines = {}
+        for machine in module.machines:
+            machines.setdefault(machine.name, machine)
+        for block in self.blocks:
+            machine = machines.get(block.machine)
+            if machine is None:
+                raise PdlSyntaxError(block.line, f"machine {block.machine} of event {block.event} is not defined")
+            if block.event not in machine.events:
+                machine.events.append(block.event)
+            for clause in block.clauses:
+                self.place(machine, block, clause)
+        for run in self.runs:
+            self.place_run(module, run)
+        for entry in self.texts:
+            self.place_text(module, machines, entry)
+
+    def place(self, machine: Machine, block: Block, clause: Clause) -> None:
+        sources: list[str] | None = None
+        conditions = []
+        for condition in clause.guard:
+            if isinstance(condition, Atom) and condition.left == machine.name and condition.operator == "=":
+                chosen = [condition.right]
+            elif isinstance(condition, Atom) and condition.left == machine.name and condition.operator == "!=":
+                chosen = [state for state in machine.states if state != condition.right]
+            elif isinstance(condition, InSet) and condition.left == machine.name:
+                chosen = condition.values
+            else:
+                conditions.append(condition)
+                continue
+            sources = chosen if sources is None else [state for state in sources if state in chosen]
+        placed = self.tags.setdefault((machine.name, block.event, clause.tag), []) if clause.tag else []
+        if clause.kind != "move":
+            for state in ["*"] if sources is None else sources:
+                handling = Handling(clause.line, clause.kind, state, block.event, "", clause.assumes, conditions)
+                machine.handlings.append(handling)
+                placed.append(handling)
+            return
+        actors = block.actors if clause.actors is None else clause.actors
+        for state in machine.states if sources is None else sources:
+            transition = Transition(
+                clause.line, state, clause.target or state, block.event, actors, "", clause.assumes, conditions, clause.effects
+            )
+            machine.transitions.append(transition)
+            placed.append(transition)
+
+    def place_run(self, module: Module, run: Run) -> None:
+        def states(formulas: list[Formula]) -> dict[str, str]:
+            result = {}
+            for formula in formulas:
+                if not isinstance(formula, Atom) or formula.operator != "=":
+                    raise PdlSyntaxError(run.line, f"run {run.name} names each machine state as Machine = State")
+                result[formula.left] = formula.right
+            return result
+
+        if any(machine for machine, _ in run.events):
+            if not all(machine for machine, _ in run.events):
+                raise PdlSyntaxError(run.line, f"run {run.name} mixes events with and without a machine")
+            module.joint_scenarios.append(
+                JointScenario(run.line, run.name, states(run.start), run.events, states(run.expect))
+            )
+            return
+        start = states(run.start[:1])
+        expect = states(run.expect)
+        machine = next(iter(start))
+        if list(expect) != [machine]:
+            raise PdlSyntaxError(run.line, f"run {run.name} expects one state of {machine}")
+        events = [event for _, event in run.events]
+        module.scenarios.append(
+            Scenario(run.line, run.name, machine, start[machine], events, expect[machine], run.start[1:])
+        )
+
+    def place_text(self, module: Module, machines: dict[str, Machine], entry: TextEntry) -> None:
+        key = entry.key
+        text = entry.attributes
+        label = text.get("label", "")
+        why = text.get("why", "")
+        if key == ["module"]:
+            module.label = label
+            return
+        if tuple(key) in self.tags:
+            for item in self.tags[tuple(key)]:
+                item.why = why
+                if isinstance(item, Transition):
+                    item.after = text.get("after", "")
+            return
+        owners = {
+            definition.name: definition
+            for group in (
+                module.terms, module.enums, module.entities, module.declarations, module.machines, module.constants,
+                module.derivations, module.screens, module.invariants, module.premises, module.assertions,
+            )
+            for definition in reversed(group)
+        }
+        owners.update({law.identifier: law for law in module.laws})
+        owner = owners.get(key[0])
+        if owner is None or len(key) > 2:
+            raise PdlSyntaxError(entry.line, f"text names {'.'.join(key)}, which is not defined")
+        if len(key) == 1:
+            if label:
+                owner.label = label
+            if why:
+                owner.why = why
+            if "mixed" in text:
+                owner.mixed_label = text["mixed"]
+            return
+        member = key[1]
+        if isinstance(owner, EnumDefinition) and member in owner.values:
+            if label:
+                owner.value_labels[member] = label
+            if "stored" in text:
+                owner.stored[member] = text["stored"]
+        elif isinstance(owner, EntityDefinition) and member in dict(owner.fields):
+            if label:
+                owner.field_labels[member] = label
+            if why:
+                owner.field_notes[member] = why
+        elif isinstance(owner, Machine) and member in owner.states:
+            owner.state_labels[member] = label
+        elif isinstance(owner, Machine) and member in owner.events:
+            owner.event_labels[member] = label
+        elif isinstance(owner, Machine) and member in owner.counters:
+            owner.counter_labels[member] = label
+        else:
+            raise PdlSyntaxError(entry.line, f"text names {'.'.join(key)}, which is not defined")
 
 
 def merge_imports(module: Module, source: Path | None, merged: set[Path], stack: list[Path]) -> None:

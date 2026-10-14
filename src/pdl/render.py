@@ -42,6 +42,7 @@ LABELS = {
         "draft": "초안",
         "draft_note": "이 문서는 구멍이 남은 상태의 초안이며, 아래 구멍이 모두 해소되어야 확정된 기획서가 된다.",
         "derivations": "상태 판정 규칙",
+        "computed": "계산되는 값",
         "invariants": "항상 성립하는 조건",
         "premises": "전제",
         "assertions": "검증한 성질",
@@ -106,6 +107,7 @@ LABELS = {
         "draft": "Draft",
         "draft_note": "This document is a draft with open holes. It is not a final plan until all holes below are resolved.",
         "derivations": "Status rules",
+        "computed": "Computed values",
         "invariants": "Invariants",
         "premises": "Premises",
         "assertions": "Verified properties",
@@ -188,9 +190,12 @@ def term_text(term: Term) -> str:
 
 def render_views(module: Module, labels: dict[str, str], names: Names, language: str) -> list[str]:
     lines: list[str] = []
-    if module.derivations:
-        lines += [f"## {labels['derivations']}", ""]
-        for derivation in module.derivations:
+    for key, computed in (("derivations", False), ("computed", True)):
+        group = [derivation for derivation in module.derivations if bool(derivation.type) == computed]
+        if not group:
+            continue
+        lines += [f"## {labels[key]}", ""]
+        for derivation in group:
             rows = row_entities(module, derivation.entity, derivation.source) or ["?"]
             mixed = derivation.mixed_label if language == "ko" and derivation.mixed_label else derivation.mixed
             note = assumption_text(derivation.assumes, module, labels)

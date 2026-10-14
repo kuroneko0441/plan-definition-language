@@ -7,7 +7,8 @@ from itertools import product
 from typing import assert_never
 
 from .ground import expand
-from .solver import Block, Step, TransitionSystem, conflicting_laws, find_world
+from .kernel import Action, Assign, Increase, Update
+from .solver import Block, TransitionSystem, conflicting_laws, find_world
 from .model import (
     And,
     Atom,
@@ -60,8 +61,7 @@ class Outcome:
 
 @dataclass
 class System:
-    machines: list[Machine]
-    counter_order: list[str]
+    names: list[str]
     rigid: list[str]
     interesting: set[str]
     seen: dict[tuple, tuple | None]
@@ -69,19 +69,16 @@ class System:
     behind: dict[tuple, list[tuple]]
 
     def assignment(self, config: tuple) -> dict[str, str]:
-        states, values, fixed = config
-        result = {machine.name: state for machine, state in zip(self.machines, states)}
-        result.update({counter: str(value) for counter, value in zip(self.counter_order, values)})
-        result.update(zip(self.rigid, fixed))
-        return result
+        return dict(zip(self.names, config))
 
     def path(self, config: tuple) -> str:
         path = []
+        fixed = config[len(config) - len(self.rigid) :]
         while (previous := self.seen[config]) is not None:
             path.append(self.steps[config])
             config = previous
         route = " -> ".join(reversed(path)) or "the start"
-        return f"{route} with {describe(dict(zip(self.rigid, config[2])))}" if self.rigid else route
+        return f"{route} with {describe(dict(zip(self.rigid, fixed)))}" if self.rigid else route
 
 
 class Index:
@@ -875,6 +872,13 @@ def check_system(module: Module, index: Index) -> list[Finding]:
     behind: dict[tuple, list[tuple]] = {}
     known_worlds: dict[frozenset[str], list[dict[str, str]] | None] = {}
     scopes: dict[int, list[dict[str, str]]] = {}
+    actions: list[Action] = []
+
+    def block(variables: set[str], formulas: list[Formula]) -> Block:
+        chosen = closure(index, variables)
+        facts = [formula for formula, enums in index.invariant_terms if enums and enums <= chosen]
+        return sorted(chosen - interesting), [*facts, *formulas]
+
     for machine in machines:
         for transition in machine.transitions:
             changed = {machine.name, *(counter for counter, _, _ in transition.effects)}
@@ -896,8 +900,20 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                     )
                 )
                 scope = [{}]
-            scopes[id(transition)] = scope
-    system = System(machines, counter_order, rigid, interesting, seen, steps, behind)
+            updates: list[tuple[str, Update]] = [(machine.name, Assign(transition.target))]
+            for counter, operator, amount in transition.effects:
+                if counter not in limits:
+                    continue
+                ceiling = bounds[counter] if bounds.get(counter) in index.enums else str(limits[counter])
+                updates.append((counter, Assign(str(amount)) if operator == "=" else Increase(amount, ceiling)))
+            free, facts = block(variables, [])
+            known = closure(index, variables) | interesting
+            after = [formula for formula, enums in pruning if enums <= known]
+            label = f"{machine.name}: {transition.event}"
+            actions.append(Action(label, machine.name, transition, transition.conditions, updates, free, facts, after))
+            scopes[id(actions[-1])] = scope
+    names = [*(machine.name for machine in machines), *counter_order, *rigid]
+    system = System(names, rigid, interesting, seen, steps, behind)
     describe_path = system.path
 
     def start_problem(start: dict[str, str]) -> Finding | None:
@@ -920,7 +936,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
         size *= len(domain)
     problems = []
     for fixed in product(*domains) if size <= SYSTEM_LIMIT else ():
-        initial = (tuple(machine.initial for machine in machines), tuple(0 for _ in counter_order), fixed)
+        initial = (*(machine.initial for machine in machines), *("0" for _ in counter_order), *fixed)
         start = system.assignment(initial)
         if not all(evaluate(formula, start, {}, index) for formula in settled):
             continue
@@ -934,40 +950,14 @@ def check_system(module: Module, index: Index) -> list[Finding]:
         findings.append(problems[0] if problems else Finding("CONTRADICTION", message, index.fact_line))
     queue = deque(seen)
 
-    def block(variables: set[str], formulas: list[Formula]) -> Block:
-        chosen = closure(index, variables)
-        facts = [formula for formula, enums in index.invariant_terms if enums and enums <= chosen]
-        return sorted(chosen - interesting), [*facts, *formulas]
-
     def solved() -> list[Finding]:
-        moves = []
-        for machine in machines:
-            for transition in machine.transitions:
-                changed = {machine.name, *(counter for counter, _, _ in transition.effects)}
-                variables = guard_enums(transition.conditions, index) - interesting
-                for _, enums in (*mixed, *pruning):
-                    if enums & changed:
-                        variables |= enums - interesting
-                known = closure(index, variables) | interesting
-                moves.append(
-                    Step(
-                        f"{machine.name}: {transition.event}",
-                        machine.name,
-                        transition.source,
-                        transition.target,
-                        block(variables, transition.conditions),
-                        [formula for formula, enums in pruning if enums <= known],
-                        transition.effects,
-                        {counter: bounds.get(counter, limits[counter]) for counter in limits},
-                    )
-                )
         openings = [([], settled)]
         openings += [block(enums - interesting, []) for _, enums in mixed]
         openings += [block(enums - interesting, [formula]) for formula, enums in pruning]
         opening = {machine.name: machine.initial for machine in machines}
         opening.update({counter: "0" for counter in counter_order})
         values = {name: definition.values for name, definition in index.enums.items()}
-        index.symbolic = TransitionSystem(values, [*opening, *rigid], opening, openings, moves)
+        index.symbolic = TransitionSystem(values, [*opening, *rigid], opening, openings, actions)
         result = [
             Finding(
                 "TOO_LARGE",
@@ -1009,7 +999,6 @@ def check_system(module: Module, index: Index) -> list[Finding]:
 
     while queue:
         config = queue.popleft()
-        states, values, fixed = config
         assignment = system.assignment(config)
         for position, formula in enumerate(watched):
             if position not in violated and not evaluate(formula, assignment, {}, index):
@@ -1022,87 +1011,72 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                         module.invariants[0].line if module.invariants else 0,
                     )
                 )
-        for number, machine in enumerate(machines):
-            for transition in machine.transitions:
-                if transition.source != states[number]:
-                    continue
-                enabling = [
-                    world
-                    for world in ({**scope, **assignment} for scope in scopes[id(transition)] if agrees(scope, assignment))
-                    if all(
-                        evaluate(condition, world, {}, index)
-                        for condition in transition.conditions
-                        if free_enums(condition, index) <= world.keys()
+        for action in actions:
+            transition = action.origin
+            if transition.source != assignment[action.machine]:
+                continue
+            enabling = [
+                world
+                for world in ({**scope, **assignment} for scope in scopes[id(action)] if agrees(scope, assignment))
+                if all(
+                    evaluate(condition, world, {}, index)
+                    for condition in action.guard
+                    if free_enums(condition, index) <= world.keys()
+                )
+            ]
+            if not enabling:
+                continue
+            after, overflowing = action.apply(assignment)
+            for counter in overflowing:
+                key = (counter, transition.line)
+                if key not in reported_overflow:
+                    reported_overflow.add(key)
+                    findings.append(
+                        Finding(
+                            "OVERFLOW",
+                            f"{counter} can exceed {bounds.get(counter, limits[counter])} on {transition.source} -> {transition.target}"
+                            f" on {transition.event} after: {describe_path(config)}",
+                            transition.line,
+                        )
                     )
-                ]
-                if not enabling:
+            if overflowing:
+                continue
+            successor = tuple(after.get(name, value) for name, value in zip(names, config))
+            enabling = [
+                world
+                for world in enabling
+                if all(
+                    evaluate(formula, {**world, **after}, {}, index)
+                    for formula in action.after
+                    if free_enums(formula, index) <= world.keys()
+                )
+            ]
+            if not enabling:
+                continue
+            behind.setdefault(successor, []).append(config)
+            for position, (formula, enums) in enumerate(mixed):
+                if position in broken:
                     continue
-                new_values = list(values)
-                overflow = False
-                for counter, operator, amount in transition.effects:
-                    if counter not in limits:
-                        continue
-                    position = counter_order.index(counter)
-                    if operator == "=":
-                        new_values[position] = amount
-                    elif new_values[position] + amount > int(assignment.get(bounds.get(counter, ""), limits[counter])):
-                        overflow = True
-                        key = (counter, transition.line)
-                        if key not in reported_overflow:
-                            reported_overflow.add(key)
-                            findings.append(
-                                Finding(
-                                    "OVERFLOW",
-                                    f"{counter} can exceed {bounds.get(counter, limits[counter])} on {transition.source} -> {transition.target}"
-                                    f" on {transition.event} after: {describe_path(config)}",
-                                    transition.line,
-                                )
+                for world in enabling:
+                    result = {**world, **after}
+                    if enums <= result.keys() and not evaluate(formula, result, {}, index):
+                        broken.add(position)
+                        path = action.label if seen[config] is None else f"{describe_path(config)} -> {action.label}"
+                        findings.append(
+                            Finding(
+                                "INVARIANT_VIOLATED",
+                                f"an invariant over machine states and enum values fails after: {path}"
+                                f" ({describe(result)})",
+                                transition.line,
                             )
-                    else:
-                        new_values[position] += amount
-                if overflow:
-                    continue
-                new_states = list(states)
-                new_states[number] = transition.target
-                successor = (tuple(new_states), tuple(new_values), fixed)
-                after = {machine.name: transition.target}
-                after.update({counter: str(value) for counter, value in zip(counter_order, new_values)})
-                enabling = [
-                    world
-                    for world in enabling
-                    if all(
-                        evaluate(formula, {**world, **after}, {}, index)
-                        for formula, enums in pruning
-                        if enums <= world.keys()
-                    )
-                ]
-                if not enabling:
-                    continue
-                behind.setdefault(successor, []).append(config)
-                step = f"{machine.name}: {transition.event}"
-                for position, (formula, enums) in enumerate(mixed):
-                    if position in broken:
-                        continue
-                    for world in enabling:
-                        result = {**world, **after}
-                        if enums <= result.keys() and not evaluate(formula, result, {}, index):
-                            broken.add(position)
-                            path = step if seen[config] is None else f"{describe_path(config)} -> {step}"
-                            findings.append(
-                                Finding(
-                                    "INVARIANT_VIOLATED",
-                                    f"an invariant over machine states and enum values fails after: {path}"
-                                    f" ({describe(result)})",
-                                    transition.line,
-                                )
-                            )
-                            break
-                if successor not in seen:
-                    seen[successor] = config
-                    steps[successor] = f"{machine.name}: {transition.event}"
-                    queue.append(successor)
-                    if len(seen) > SYSTEM_LIMIT:
-                        return findings + solved()
+                        )
+                        break
+            if successor not in seen:
+                seen[successor] = config
+                steps[successor] = action.label
+                queue.append(successor)
+                if len(seen) > SYSTEM_LIMIT:
+                    return findings + solved()
     for number, machine in enumerate(machines):
         if machine.replica:
             continue
@@ -1112,14 +1086,14 @@ def check_system(module: Module, index: Index) -> list[Finding]:
             forward.setdefault(transition.source, set()).add(transition.target)
             backward.setdefault(transition.target, set()).add(transition.source)
         statically = reachable_from(machine.initial, forward)
-        reached = {config[0][number] for config in seen}
+        reached = {config[number] for config in seen}
         for state in machine.states:
             if state in statically and state not in reached:
                 findings.append(
                     Finding("UNREACHABLE", f"state {state} of {machine.name} is never reached once guards and counters are applied", machine.line)
                 )
         goals = {machine.initial} if machine.cyclic else set(machine.terminals)
-        finishing = {config for config in seen if config[0][number] in goals}
+        finishing = {config for config in seen if config[number] in goals}
         if not finishing:
             continue
         queue = deque(finishing)
@@ -1131,7 +1105,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
         statically_finishing = set().union(*(reachable_from(goal, backward) for goal in goals))
         aim = "return to the initial state" if machine.cyclic else "reach a terminal state"
         for state in machine.states:
-            stuck = next((c for c in seen if c[0][number] == state and c not in finishing), None)
+            stuck = next((c for c in seen if c[number] == state and c not in finishing), None)
             if state in statically_finishing and stuck is not None:
                 findings.append(
                     Finding(

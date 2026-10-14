@@ -2,12 +2,12 @@
 
 import operator
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import assert_never
 
 import z3
 from z3 import z3util
 
+from .kernel import Action, Assign
 from .model import And, Atom, Call, Can, Exists, ForAll, Formula, Implies, InSet, Law, Not, Or, Reference, Term
 
 ORDERINGS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
@@ -121,21 +121,9 @@ def find_world(enums: dict[str, list[str]], formulas: list[Formula], names: list
 Block = tuple[list[str], list[Formula]]
 
 
-@dataclass
-class Step:
-    label: str
-    machine: str
-    source: str
-    target: str
-    guard: Block
-    after: list[Formula]
-    effects: list[tuple[str, str, int]]
-    limits: dict[str, int | str]
-
-
 class TransitionSystem:
     def __init__(
-        self, enums: dict[str, list[str]], states: list[str], start: dict[str, str], openings: list[Block], steps: list[Step]
+        self, enums: dict[str, list[str]], states: list[str], start: dict[str, str], openings: list[Block], steps: list[Action]
     ):
         self.encoder = Encoder(enums)
         self.states = states
@@ -164,25 +152,22 @@ class TransitionSystem:
             constraints += self.block(block, environment)[0]
         return [*self.bounded(environment), *constraints]
 
-    def move(self, step: Step, before: Environment, after: Environment) -> list[Constraint]:
-        values = self.encoder.enums[step.machine]
-        constraints, world = self.block(step.guard, before)
-        constraints += [before[step.machine] == values.index(step.source), after[step.machine] == values.index(step.target)]
-        constraints += [self.encoder.encode(formula, {**after, **world}) for formula in step.after]
-        changed: dict[str, z3.ArithRef] = {}
-        for counter, operation, amount in step.effects:
-            if counter not in step.limits:
+    def move(self, action: Action, before: Environment, after: Environment) -> list[Constraint]:
+        values = self.encoder.enums
+        constraints, world = self.block((action.free, [*action.facts, *action.guard]), before)
+        constraints.append(before[action.machine] == values[action.machine].index(action.origin.source))
+        constraints += [self.encoder.encode(formula, {**after, **world}) for formula in action.after]
+        changed: dict[str, Number] = {}
+        for name, update in action.updates:
+            if isinstance(update, Assign):
+                # A value outside the domain gets a position that no variable can hold.
+                known = update.value in values[name]
+                changed[name] = values[name].index(update.value) if known else len(values[name])
                 continue
-            if operation == "=":
-                changed[counter] = z3.IntVal(amount)
-                continue
-            limit = step.limits[counter]
-            ceiling = z3.IntVal(limit) if isinstance(limit, int) else self.encoder.number(True, limit, before)
-            changed[counter] = changed.get(counter, before[counter]) + amount
-            constraints.append(changed[counter] <= ceiling)
-        for name in self.states:
-            if name != step.machine:
-                constraints.append(after[name] == changed.get(name, before[name]))
+            limit = self.encoder.number(not update.ceiling.isdigit(), update.ceiling, before)
+            changed[name] = changed.get(name, before[name]) + update.amount
+            constraints.append(z3.BoolVal(False) if limit is None else changed[name] <= limit)
+        constraints += [after[name] == changed.get(name, before[name]) for name in self.states]
         return [*self.bounded(after), *constraints]
 
     def reachable(self, bad: Block) -> bool | None:

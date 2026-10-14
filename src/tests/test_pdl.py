@@ -1484,6 +1484,27 @@ class SyntaxTest(unittest.TestCase):
             self.assertIn("M.Go @Ext {", (root / "new" / "old.pdl").read_text(encoding="utf-8"))
 
 
+class ReferenceTest(unittest.TestCase):
+    def test_the_reference_command_prints_the_packaged_reference(self):
+        import contextlib
+        import io
+
+        from pdl.cli import main
+        from pdl.reference import reference
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(["reference"]), 0)
+        self.assertEqual(output.getvalue(), reference())
+
+    def test_the_complete_example_of_the_reference_builds_clean(self):
+        from pdl.reference import reference
+
+        example = reference().split("## Complete example", 1)[1].split("```", 2)[1]
+        findings = check(syntax.parse_module(example))
+        self.assertEqual([f for f in findings if f.blocking], [])
+
+
 class ConsistencyTest(unittest.TestCase):
     def kinds(self, *texts: str) -> Counter:
         modules = [(Path(f"m{number}.pdl"), parse_module(text)) for number, text in enumerate(texts)]

@@ -19,6 +19,7 @@ pdl build door.pdl --draft          # writes a draft when the module has holes
 pdl build door.pdl --language en --output out
 pdl consistency plans/              # compares the modules of one plan
 pdl convert old-plans/ --output plans/
+pdl reference                       # prints the language reference of this release
 ```
 
 `build` exits with a nonzero status when a module has a hole.

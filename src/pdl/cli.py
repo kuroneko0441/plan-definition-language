@@ -7,6 +7,7 @@ from . import legacy
 from .checks import check
 from .format import to_text
 from .project import compare
+from .reference import reference
 from .render import render
 from .syntax import PdlSyntaxError, parse_module
 
@@ -72,12 +73,17 @@ def convert_file(path: Path, output_directory: Path) -> bool:
 
 def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pdl")
-    parser.add_argument("command", choices=["build", "consistency", "convert"])
-    parser.add_argument("paths", nargs="+", type=Path)
+    parser.add_argument("command", choices=["build", "consistency", "convert", "reference"])
+    parser.add_argument("paths", nargs="*", type=Path)
     parser.add_argument("--output", type=Path, default=Path("build"))
     parser.add_argument("--language", choices=["ko", "en"], default="ko")
     parser.add_argument("--draft", action="store_true")
     options = parser.parse_args(arguments)
+    if options.command == "reference":
+        print(reference(), end="")
+        return 0
+    if not options.paths:
+        parser.error(f"{options.command} needs at least one path")
     if options.command == "consistency":
         return 0 if check_consistency(options.paths) else 1
     if options.command == "convert":

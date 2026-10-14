@@ -1,0 +1,53 @@
+module booking
+
+actor Customer, Staff
+external Gateway
+
+Booking : {Requested, Confirmed, Cancelled} init Requested final {Confirmed, Cancelled}
+Payment : {Unpaid, Paid, Refunded, Void} init Unpaid final {Paid, Refunded, Void}
+
+# Confirm does not read the payment, so a booking can be confirmed before it is paid.
+Booking.Confirm @Staff {
+    Booking = Requested => Booking' = Confirmed
+    else reject
+}
+Booking.Cancel @Customer {
+    Booking in {Requested, Confirmed} => Booking' = Cancelled
+    else reject
+}
+Payment.Pay @Gateway {
+    Payment = Unpaid & Booking = Requested => Payment' = Paid
+    else reject
+}
+Payment.Refund @Staff {
+    Payment = Paid & Booking = Cancelled => Payment' = Refunded
+    else reject
+}
+Payment.Close @Staff {
+    Payment = Unpaid & Booking = Cancelled => Payment' = Void
+    else reject
+}
+
+inv confirmed_is_paid: Booking = Confirmed => Payment = Paid
+
+text {
+    module "예약과 결제"
+    Customer "고객"
+    Staff "직원"
+    Gateway "결제 대행사"
+    Booking "예약"
+    Booking.Requested "요청됨"
+    Booking.Confirmed "확정됨"
+    Booking.Cancelled "취소됨"
+    Booking.Confirm "확정"
+    Booking.Cancel "취소"
+    Payment "결제"
+    Payment.Unpaid "미결제"
+    Payment.Paid "결제됨"
+    Payment.Refunded "환불됨"
+    Payment.Void "무효"
+    Payment.Pay "결제"
+    Payment.Refund "환불"
+    Payment.Close "마감"
+    confirmed_is_paid why "확정된 예약은 결제가 끝난 예약이다."
+}

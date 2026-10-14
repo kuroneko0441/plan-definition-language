@@ -1,0 +1,1 @@
+11: HOLE TRAP state Draft of Order1.Flow cannot reach a terminal state once guards and counters are applied after: the start with Member1.standing=Suspended, Member2.standing=Active, Order1.buyer=Member1, Order2.buyer=Member1

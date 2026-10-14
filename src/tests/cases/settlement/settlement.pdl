@@ -1,0 +1,38 @@
+module settlement
+
+actor Accountant
+Kind : {Sale, Return}
+
+Settlement key (id) { id: Text, month: Month, opened_on: Day, closed_on: Day? }
+SettlementRow passive { settlement: Settlement, kind: Kind, amount: Money }
+Adjustment passive { settlement: Settlement, amount: Money, reason: Text }
+
+action ViewTotal by (Accountant) on (Settlement)
+permit Accountant ViewTotal Settlement
+
+derive Total of Settlement : Money from SettlementRow.amount, Adjustment.amount
+derive RowKind of Settlement from Kind mixed Mixed
+screen Totals of Settlement shows Settlement.month, Total, RowKind
+
+law closes_after_opening: Settlement.opened_on <= Settlement.closed_on
+law opens_in_its_month: month_of(Settlement.opened_on) = Settlement.month
+
+text {
+    module "정산서"
+    Accountant "회계 담당자"
+    Kind "행 구분"
+    Kind.Sale "판매"
+    Kind.Return "반품"
+    Settlement "정산서"
+    Settlement.month "정산월"
+    SettlementRow "정산 행"
+    SettlementRow.amount "금액"
+    Adjustment "조정"
+    Adjustment.amount "금액"
+    ViewTotal "총금액 조회"
+    Total "총금액" why "합계 금액은 칼럼으로 저장하지 않고 행과 조정에서 항상 계산한다."
+    RowKind "행 구성" mixed "혼합"
+    Totals "정산서별 총금액"
+    closes_after_opening why "정산서는 연 날보다 먼저 닫히지 않는다."
+    opens_in_its_month why "정산서는 정산월 안에 연다."
+}

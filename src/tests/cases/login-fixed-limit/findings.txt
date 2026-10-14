@@ -1,0 +1,2 @@
+11: HOLE UNCOVERED Active on Fail has no outcome when Tries=3, limit=4; Tries=3, limit=5; Tries=4, limit=5 (3 combinations)
+24: NOTE UNVERIFIED lock_limit is provisional and unverified

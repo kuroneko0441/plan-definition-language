@@ -1,0 +1,38 @@
+module login
+
+actor Member, Admin
+const limit : 3..5 assuming lock_limit
+
+Account : {Active, Locked} init Active cyclic
+Account.Tries : 0..limit
+
+# The guard names 3 where it means the limit, so two values of the limit leave a case without a clause.
+Account.Fail @Member {
+    Account = Active & Tries < 3 => Tries' = Tries + 1
+    Account = Active & Tries = limit => Account' = Locked
+    Account = Locked => reject
+}
+Account.Success @Member {
+    Account = Active => Tries' = 0
+    else reject
+}
+Account.Unlock @Admin {
+    Account = Locked => Account' = Active & Tries' = 0
+    else reject
+}
+
+unknown value lock_limit { label "잠금까지의 실패 횟수" source "보안 회의록 3행" provisional "5회" }
+
+text {
+    module "로그인 잠금"
+    Member "회원"
+    Admin "관리자"
+    limit "잠금까지의 실패 횟수"
+    Account "계정"
+    Account.Active "사용 중"
+    Account.Locked "잠김"
+    Account.Tries "연속 실패 횟수"
+    Account.Fail "로그인 실패"
+    Account.Success "로그인 성공"
+    Account.Unlock "잠금 해제"
+}

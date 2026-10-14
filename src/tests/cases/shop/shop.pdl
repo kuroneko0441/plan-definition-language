@@ -1,0 +1,47 @@
+module shop
+
+actor Buyer
+external Gateway
+
+Standing : {Active, Suspended}
+Member key (id) passive { id: Text, standing: Standing fixed }
+Order key (id) passive { id: Text, buyer: Member fixed }
+scope Member 2
+scope Order 2
+
+Flow of Order : {Draft, Paid, Cancelled} init Draft final {Paid, Cancelled}
+
+Flow.Pay @Gateway {
+    Flow = Draft & this.buyer.standing = Active => Flow' = Paid
+    else reject as suspended
+}
+Flow.Cancel @Buyer {
+    Flow = Draft => Flow' = Cancelled
+    else reject
+}
+
+prop paid_by_active: always all o in Order: o.Flow = Paid => o.buyer.standing = Active
+prop all_can_be_paid: reachable all o in Order: o.Flow = Paid
+prop independent: reachable Order1.Flow = Paid & Order2.Flow = Cancelled
+
+text {
+    module "주문"
+    Buyer "구매자"
+    Gateway "결제 대행사"
+    Standing "회원 상태"
+    Standing.Active "정상"
+    Standing.Suspended "정지"
+    Member "회원"
+    Order "주문"
+    Order.buyer "구매자"
+    Flow "주문 진행"
+    Flow.Draft "작성 중"
+    Flow.Paid "결제됨"
+    Flow.Cancelled "취소됨"
+    Flow.Pay "결제"
+    Flow.Cancel "취소"
+    Flow.Pay.suspended why "정지된 회원의 결제는 받지 않는다."
+    paid_by_active why "결제된 주문의 구매자는 모두 정상 회원이다."
+    all_can_be_paid why "두 주문이 모두 결제되는 경우가 있다."
+    independent why "한 주문의 결제는 다른 주문의 취소를 막지 않는다."
+}

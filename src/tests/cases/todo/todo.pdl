@@ -1,0 +1,57 @@
+module todo
+
+actor Owner, Guest
+Sharing : {Private, Shared}
+Task key (id) { id: Text, title: Text, created_on: Day, due_on: Day? }
+action View on (Task), Edit on (Task)
+
+permit Owner * Task as owner
+permit Guest View Task: Sharing = Shared
+forbid Guest View Task: Sharing = Private
+forbid Guest Edit Task as read_only
+
+law due_after_created: Task.created_on <= Task.due_on
+screen TaskList of Task shows Task.title, Task.due_on, Sharing
+
+Progress : {Open, Done, Archived} init Open final {Archived}
+
+Progress.Complete @Owner {
+    Progress = Open => Progress' = Done
+    else reject
+}
+Progress.Reopen @Owner {
+    Progress = Done => Progress' = Open
+    else reject
+}
+Progress.Archive @Owner {
+    Progress != Archived => Progress' = Archived
+    else reject
+}
+
+run finish_and_archive: Progress = Open -> Complete, Archive -> Progress = Archived
+
+text {
+    module "할 일 앱"
+    Owner "작성자"
+    Guest "공유받은 사람"
+    Sharing "공유 상태" why "할 일을 다른 사람에게 보여 주는지를 나타낸다."
+    Sharing.Private "비공개"
+    Sharing.Shared "공유됨"
+    Task "할 일" why "작성자가 적은 일 한 건이다."
+    Task.title "제목"
+    Task.created_on "작성일"
+    Task.due_on "마감일"
+    View "조회"
+    Edit "수정"
+    owner why "작성자는 자기 할 일을 언제나 보고 고친다."
+    read_only why "공유받은 사람은 보기만 한다."
+    due_after_created why "마감일은 작성일보다 앞설 수 없다."
+    TaskList "할 일 목록"
+    Progress "진행"
+    Progress.Open "할 일"
+    Progress.Done "완료"
+    Progress.Archived "보관됨"
+    Progress.Complete "완료 처리"
+    Progress.Reopen "다시 열기"
+    Progress.Archive "보관"
+}

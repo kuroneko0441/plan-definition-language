@@ -1,0 +1,32 @@
+module shop
+
+external Gateway
+
+Standing : {Active, Suspended}
+Member key (id) passive { id: Text, standing: Standing fixed }
+Order key (id) passive { id: Text, buyer: Member fixed }
+scope Member 2
+scope Order 2
+
+Flow of Order : {Draft, Paid} init Draft final {Paid}
+
+# No event takes the order of a suspended member out of Draft, so that order never ends.
+Flow.Pay @Gateway {
+    Flow = Draft & this.buyer.standing = Active => Flow' = Paid
+    else reject
+}
+
+text {
+    module "주문"
+    Gateway "결제 대행사"
+    Standing "회원 상태"
+    Standing.Active "정상"
+    Standing.Suspended "정지"
+    Member "회원"
+    Order "주문"
+    Order.buyer "구매자"
+    Flow "주문 진행"
+    Flow.Draft "작성 중"
+    Flow.Paid "결제됨"
+    Flow.Pay "결제"
+}

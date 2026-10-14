@@ -35,6 +35,8 @@ LABELS = {
         "counter": "카운터",
         "instance": "건마다 따로 진행되는 대상",
         "fixed": "변하지 않음",
+        "first_value": "처음 값",
+        "update": "값 변경",
         "after": "제한 시간",
         "stored": "저장값",
         "basic_types": "기본 자료형은 Text(글자), Int(정수), Decimal(소수), Money(금액), Bool(참 또는 거짓), Timestamp(시각), Duration(기간), Day(일), Week(주), Month(월)이다. 시간 값은 next(다음), before(이전), month_of(일이 속한 월)로 계산하고, 자료형 뒤의 물음표는 비어 있을 수 있음을, list는 여러 개를 뜻한다.",
@@ -100,6 +102,8 @@ LABELS = {
         "counter": "Counter",
         "instance": "One flow for each",
         "fixed": "fixed",
+        "first_value": "starts as",
+        "update": "sets",
         "after": "time limit",
         "stored": "Stored text",
         "basic_types": "Basic types are Text, Int, Decimal, Money, Bool, Timestamp, Duration, Day, Week, and Month.",
@@ -331,6 +335,13 @@ def render_machines(
     def event_text(machine: Machine, event: str) -> str:
         return machine.event_labels.get(event) or event if language == "ko" else event
 
+    def update_text(machine: Machine, path: str, value: str) -> str:
+        attribute = path.removeprefix("this.")
+        if attribute == path:
+            return f"{path} = {value}"
+        kind = names.field_types.get((machine.entity, attribute), "").removesuffix("?")
+        return f"{names.field(machine.entity, attribute)} = {names.value(kind, value)}"
+
     for machine in module.machines:
         title = machine.label if language == "ko" and machine.label else machine.name
         lines += [f"## {labels['machines']}: {title}", ""]
@@ -377,6 +388,8 @@ def render_machines(
                 for counter, operator, amount in transition.effects
             )
             effects_note = f" ({labels['counter']}: {effects})" if effects else ""
+            updates = ", ".join(update_text(machine, path, value) for path, value in transition.updates)
+            effects_note += f" ({labels['update']}: {updates})" if updates else ""
             after_note = f" ({labels['after']}: {transition.after})" if transition.after else ""
             if language == "ko":
                 subject = f"'{event}'" + ("이" if has_final_consonant(event) else "가")
@@ -556,6 +569,7 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
                         (f"{n} ({e.field_labels[n]})" if n in e.field_labels else n)
                         + f": {t}"
                         + (f" [{labels['fixed']}]" if n in e.fixed else "")
+                        + (f" [{labels['first_value']}: {e.starts[n]}]" if n in e.starts else "")
                         + (f" - {e.field_notes[n]}" if n in e.field_notes else "")
                         for n, t in e.fields
                     ),

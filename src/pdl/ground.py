@@ -18,6 +18,7 @@ from .model import (
     Not,
     Or,
     Premise,
+    Transition,
 )
 
 MAXIMUM_SCOPE = 6
@@ -109,6 +110,7 @@ class Expander:
                 self.globals |= {machine.name, *machine.counters}
         self.variables: dict[str, EnumDefinition] = {}
         self.rigid: list[str] = []
+        self.mutable: dict[str, str] = {}
         self.bounds: list[Premise] = []
         for constant in self.constants.values():
             values = [str(number) for number in range(constant.low, constant.high + 1)]
@@ -145,6 +147,11 @@ class Expander:
             self.variables.setdefault(full, EnumDefinition(line, full, domain))
             if name in self.entities[entity].fixed and full not in self.rigid:
                 self.rigid.append(full)
+            start = self.entities[entity].starts.get(name)
+            if start is not None and start not in domain:
+                raise ExpansionError(f"initial value {start} is not a value of {entity}.{name}")
+            if start is not None:
+                self.mutable[full] = start
             return Leaf("var", full, base, tuple(domain))
         if name in machines:
             return Leaf("var", full, f"{entity}.{name}", tuple(machines[name].states))
@@ -276,6 +283,23 @@ class Expander:
     def formulas(self, formulas: list[Formula], environment: dict[str, Leaf], line: int) -> list[Formula]:
         return [self.formula(formula, environment, line) for formula in formulas]
 
+    def updates(self, transition: Transition, environment: dict[str, Leaf]) -> list[tuple[str, str]]:
+        resolved = []
+        for path, value in transition.updates:
+            try:
+                cases = self.expand_term(path, environment, transition.line)
+                conditions, leaf = cases[0]
+                if len(cases) > 1 or conditions or leaf.kind != "var":
+                    raise ExpansionError(f"{path} is not a field of this or of an entity instance")
+                if leaf.text not in self.mutable:
+                    raise ExpansionError(f"{path} is not a var field, so a clause cannot set it")
+                if value not in leaf.domain:
+                    raise ExpansionError(f"{value} is not a value of {path}")
+                resolved.append((leaf.text, value))
+            except ExpansionError as error:
+                self.problems.append(("UNDEFINED", str(error), transition.line))
+        return resolved
+
     def machine(self, machine: Machine, atom: str, replica: bool) -> Machine:
         prefix = f"{atom}." if atom else ""
         environment: dict[str, Leaf] = {}
@@ -299,6 +323,7 @@ class Expander:
                 replace(
                     transition,
                     conditions=self.formulas(transition.conditions, environment, transition.line),
+                    updates=self.updates(transition, environment),
                     effects=[
                         (prefix + counter if counter in machine.counters else counter, operator, amount)
                         for counter, operator, amount in transition.effects
@@ -372,4 +397,5 @@ def expand(module: Module) -> tuple[Module, list[Problem]]:
     )
     expanded.variables = list(expander.variables.values())
     expanded.rigid = expander.rigid
+    expanded.mutable = expander.mutable
     return expanded, expander.problems

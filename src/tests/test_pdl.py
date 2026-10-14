@@ -951,6 +951,78 @@ class RelationTest(unittest.TestCase):
         self.assertIn("- a: `always ∃ o ∈ Order : o.Flow = Open`", document)
 
 
+PARCEL = """
+module m
+actor Courier
+external Gateway
+Flag : {No, Yes}
+Parcel key (id) passive { id: Text, paid: Flag var init No }
+scope Parcel 2
+Flow of Parcel : {Packed, Shipped} init Packed final {Shipped}
+Billing of Parcel : {Open, Settled} init Open final {Settled}
+Billing.Pay @Gateway {
+    Billing = Open => Billing' = Settled & this.paid' = Yes
+    else reject
+}
+Flow.Ship @Courier {
+    Flow = Packed & this.paid = Yes => Flow' = Shipped
+    else reject
+}
+prop shipped_is_paid: always all p in Parcel: p.Flow = Shipped => p.paid = Yes
+prop stays_paid: always all p in Parcel: p.Billing = Settled => p.paid = Yes
+"""
+
+
+class FieldUpdateTest(unittest.TestCase):
+    def findings(self, text: str) -> list[tuple[str, str]]:
+        return [(f.kind, f.message) for f in check(syntax.parse_module(text)) if f.blocking]
+
+    def test_a_var_field_keeps_the_value_that_a_clause_sets(self):
+        self.assertEqual(self.findings(PARCEL), [])
+
+    def test_a_var_field_starts_at_its_initial_value(self):
+        findings = self.findings(PARCEL.replace("this.paid' = Yes", "this.paid' = No"))
+        self.assertEqual([kind for kind, _ in findings], ["UNREACHABLE", "ASSERTION_FAILED"])
+        self.assertIn("Parcel1.paid=No", findings[1][1])
+
+    def test_a_field_without_var_still_changes_between_transitions(self):
+        findings = self.findings(PARCEL.replace(" var init No", "").replace(" & this.paid' = Yes", ""))
+        self.assertEqual([kind for kind, _ in findings], ["ASSERTION_FAILED", "ASSERTION_FAILED"])
+
+    def test_a_clause_sets_only_a_var_field_to_one_of_its_values(self):
+        plain = self.findings(PARCEL.replace(" var init No", ""))
+        self.assertIn(("UNDEFINED", "this.paid is not a var field, so a clause cannot set it"), plain)
+        wrong = self.findings(PARCEL.replace("this.paid' = Yes", "this.paid' = Maybe"))
+        self.assertIn(("UNDEFINED", "Maybe is not a value of this.paid"), wrong)
+        start = self.findings(PARCEL.replace("init No", "init Maybe"))
+        self.assertIn(("UNDEFINED", "initial value Maybe is not a value of Parcel.paid"), start)
+
+    def test_clauses_that_set_a_field_differently_contradict(self):
+        text = PARCEL.replace("    else reject\n}\nFlow.Ship", "    Billing = Open => Billing' = Settled\n}\nFlow.Ship")
+        self.assertIn(("CONTRADICTION", "Open on Pay changes the fields in different ways"), self.findings(text))
+
+    def test_the_solver_agrees_with_enumeration(self):
+        broken = PARCEL.replace("this.paid' = Yes", "this.paid' = No")
+        with mock.patch("pdl.checks.SYSTEM_LIMIT", 0):
+            self.assertEqual(self.findings(PARCEL)[1:], [])
+            solved = self.findings(broken)[1:]
+        self.assertEqual(solved, self.findings(broken))
+
+    def test_a_run_applies_the_update(self):
+        run = "run paid: Billing = Open -> Pay -> Billing = Settled\n"
+        self.assertEqual(self.findings(PARCEL + run), [])
+
+    def test_the_module_is_written_back_and_rendered(self):
+        module = syntax.parse_module(PARCEL)
+        text = to_text(module)
+        self.assertIn("paid: Flag var init No", text)
+        self.assertIn("Billing = Open => Billing' = Settled & this.paid' = Yes", text)
+        self.assertEqual(to_text(syntax.parse_module(text)), text)
+        document = render(module, check(module), "en")
+        self.assertIn("Pay moves to Settled. (actor: Gateway) (sets: Flag = Yes)", document)
+        self.assertIn("paid: Flag [starts as: No]", document)
+
+
 LOGIN = (
     "module m\nexternal Sys\nconst limit in 1..4\n"
     "machine Login { states Active, Locked\ninitial Active\nterminal Locked\nevent Fail\ncounter Tries max limit\n"

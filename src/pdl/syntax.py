@@ -75,6 +75,7 @@ class Clause:
     kind: str
     target: str = ""
     effects: list[tuple[str, str, int]] = field(default_factory=list)
+    updates: list[tuple[str, str]] = field(default_factory=list)
     actors: list[str] | None = None
     assumes: list[str] = field(default_factory=list)
     tag: str = ""
@@ -390,11 +391,13 @@ class Parser:
         return token.value
 
     def update(self, clause: Clause, machine: str) -> None:
-        name = self.word()
+        name = self.path()
         self.expect("'")
         self.expect("=")
         value = self.word()
-        if name == machine:
+        if "." in name:
+            clause.updates.append((name, value))
+        elif name == machine:
             clause.target = value
         elif self.accept("+"):
             if value != name:
@@ -410,6 +413,7 @@ class Parser:
         passive = self.accept("passive")
         fields: list[tuple[str, str]] = []
         fixed: list[str] = []
+        starts: dict[str, str] = {}
         self.expect("{")
         while not self.accept("}"):
             field_name = self.word()
@@ -418,8 +422,11 @@ class Parser:
             fields.append((field_name, prefix + self.word() + ("?" if self.accept("?") else "")))
             if self.accept("fixed"):
                 fixed.append(field_name)
+            elif self.accept("var"):
+                self.expect("init")
+                starts[field_name] = self.word()
             self.accept(",")
-        module.entities.append(EntityDefinition(line, name, key, passive, fields, fixed=fixed))
+        module.entities.append(EntityDefinition(line, name, key, passive, fields, fixed=fixed, starts=starts))
         module.definitions.append(("entity", name, line))
 
     def import_statement(self, module: Module) -> None:
@@ -641,6 +648,7 @@ class Parser:
             transition = Transition(
                 clause.line, state, clause.target or state, block.event, actors, "", clause.assumes, conditions, clause.effects
             )
+            transition.updates = clause.updates
             machine.transitions.append(transition)
             placed.append(transition)
 

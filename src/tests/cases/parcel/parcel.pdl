@@ -1,0 +1,48 @@
+module parcel
+
+actor Courier
+external Gateway
+
+Flag : {No, Yes}
+Parcel key (id) passive { id: Text, paid: Flag var init No }
+scope Parcel 2
+
+Flow of Parcel : {Packed, Shipped} init Packed final {Shipped}
+Billing of Parcel : {Open, Settled} init Open final {Settled}
+
+Billing.Pay @Gateway {
+    Billing = Open => Billing' = Settled & this.paid' = Yes
+    else reject
+}
+Flow.Ship @Courier {
+    Flow = Packed & this.paid = Yes => Flow' = Shipped
+    else reject as unpaid
+}
+
+prop shipped_is_paid: always all p in Parcel: p.Flow = Shipped => p.paid = Yes
+prop stays_paid: always all p in Parcel: p.Billing = Settled => p.paid = Yes
+prop both_ship: reachable all p in Parcel: p.Flow = Shipped
+run pay_first: Billing = Open -> Pay -> Billing = Settled
+
+text {
+    module "소포"
+    Courier "배송 기사"
+    Gateway "결제 대행사"
+    Flag "여부"
+    Flag.No "아니오"
+    Flag.Yes "예"
+    Parcel "소포"
+    Parcel.paid "결제 여부"
+    Flow "배송"
+    Flow.Packed "포장됨"
+    Flow.Shipped "발송됨"
+    Flow.Ship "발송"
+    Billing "결제"
+    Billing.Open "미결제"
+    Billing.Settled "결제됨"
+    Billing.Pay "결제"
+    Flow.Ship.unpaid why "결제되지 않은 소포는 발송하지 않는다."
+    shipped_is_paid why "발송된 소포는 모두 결제된 소포이다."
+    stays_paid why "결제된 소포의 결제 여부는 되돌아가지 않는다."
+    both_ship why "두 소포가 모두 발송되는 경우가 있다."
+}

@@ -111,6 +111,7 @@ class Index:
         self.action_actors = {d.name: set(d.performed_by) for d in actions if d.performed_by}
         self.action_resources = {d.name: set(d.applies_to) for d in actions if d.applies_to}
         self.unknown_ids = {unknown.identifier for unknown in module.unknowns}
+        self.starts = dict(module.mutable)
         obligations = [invariant.formula for invariant in module.invariants]
         premises = [Not(And([exclusion.left, exclusion.right])) for exclusion in module.exclusions]
         premises += [premise.formula for premise in module.premises]
@@ -632,7 +633,8 @@ def transition_outcome(transition: Transition) -> tuple:
     changes: dict[str, list[tuple[str, int]]] = {}
     for counter, operator, amount in transition.effects:
         changes.setdefault(counter, []).append((operator, amount))
-    return transition.target, tuple(sorted((counter, tuple(steps)) for counter, steps in changes.items()))
+    counters = tuple(sorted((counter, tuple(steps)) for counter, steps in changes.items()))
+    return transition.target, counters, tuple(dict(transition.updates).items())
 
 
 def agrees(world: dict[str, str], assignment: dict[str, str]) -> bool:
@@ -665,7 +667,8 @@ def check_guards(
                     Finding("CONTRADICTION", f"{label} leads to {', '.join(sorted(destinations))}", line)
                 )
             elif len({transition_outcome(transition) for transition in group}) > 1:
-                findings.append(Finding("CONTRADICTION", f"{label} changes the counters in different ways", line))
+                changed = "counters" if len({transition_outcome(transition)[1] for transition in group}) > 1 else "fields"
+                findings.append(Finding("CONTRADICTION", f"{label} changes the {changed} in different ways", line))
             continue
         variables = set().union(*(guard_enums(item.conditions, index) for item in (*group, *held)))
         assignments = worlds(index, variables)
@@ -840,7 +843,8 @@ def check_system(module: Module, index: Index) -> list[Finding]:
     machines = [machine for machine in module.machines if machine.initial in machine.states]
     counters = [(machine.name, counter) for machine in machines for counter in machine.counters]
     rigid = [name for name in module.rigid if name in index.enums]
-    interesting = {machine.name for machine in machines} | {counter for _, counter in counters} | set(rigid)
+    mutable = {name: start for name, start in module.mutable.items() if name in index.enums}
+    interesting = {machine.name for machine in machines} | {counter for _, counter in counters} | set(mutable) | set(rigid)
     guarded = any(
         guard_enums(transition.conditions, index) & interesting
         for machine in machines
@@ -881,7 +885,8 @@ def check_system(module: Module, index: Index) -> list[Finding]:
 
     for machine in machines:
         for transition in machine.transitions:
-            changed = {machine.name, *(counter for counter, _, _ in transition.effects)}
+            written = [(name, Assign(value)) for name, value in transition.updates if name in mutable]
+            changed = {machine.name, *(counter for counter, _, _ in transition.effects), *(name for name, _ in written)}
             variables = guard_enums(transition.conditions, index) - interesting
             for _, enums in (*mixed, *pruning):
                 if enums & changed:
@@ -900,7 +905,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                     )
                 )
                 scope = [{}]
-            updates: list[tuple[str, Update]] = [(machine.name, Assign(transition.target))]
+            updates: list[tuple[str, Update]] = [(machine.name, Assign(transition.target)), *written]
             for counter, operator, amount in transition.effects:
                 if counter not in limits:
                     continue
@@ -912,7 +917,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
             label = f"{machine.name}: {transition.event}"
             actions.append(Action(label, machine.name, transition, transition.conditions, updates, free, facts, after))
             scopes[id(actions[-1])] = scope
-    names = [*(machine.name for machine in machines), *counter_order, *rigid]
+    names = [*(machine.name for machine in machines), *counter_order, *mutable, *rigid]
     system = System(names, rigid, interesting, seen, steps, behind)
     describe_path = system.path
 
@@ -936,7 +941,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
         size *= len(domain)
     problems = []
     for fixed in product(*domains) if size <= SYSTEM_LIMIT else ():
-        initial = (*(machine.initial for machine in machines), *("0" for _ in counter_order), *fixed)
+        initial = (*(machine.initial for machine in machines), *("0" for _ in counter_order), *mutable.values(), *fixed)
         start = system.assignment(initial)
         if not all(evaluate(formula, start, {}, index) for formula in settled):
             continue
@@ -956,6 +961,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
         openings += [block(enums - interesting, [formula]) for formula, enums in pruning]
         opening = {machine.name: machine.initial for machine in machines}
         opening.update({counter: "0" for counter in counter_order})
+        opening.update(mutable)
         values = {name: definition.values for name, definition in index.enums.items()}
         index.symbolic = TransitionSystem(values, [*opening, *rigid], opening, openings, actions)
         result = [
@@ -1301,14 +1307,16 @@ def check_joint_scenarios(module: Module, index: Index) -> list[Finding]:
             continue
         states = dict(scenario.start)
         counters = {counter: 0 for name in states for counter in index.machines[name].counters}
+        fields = dict(index.starts)
         failed = False
         for machine_name, event in scenario.events:
             machine = index.machines[machine_name]
-            world = {**states, **{counter: str(value) for counter, value in counters.items()}}
+            world = {**fields, **states, **{counter: str(value) for counter, value in counters.items()}}
             outcome, transition = scenario_step(machine, states[machine_name], event, world, index)
             if transition is not None:
                 states[machine_name] = transition.target
                 apply_effects(transition, counters)
+                fields.update(transition.updates)
             elif outcome != "ignored":
                 findings.append(
                     Finding(
@@ -1363,13 +1371,15 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
 
 def replay(machine: Machine, scenario: Scenario, given: dict[str, str], index: Index) -> str:
     counters = {counter: 0 for counter in machine.counters}
+    fields = {**index.starts, **given}
     state = scenario.start
     for event in scenario.events:
-        world = {**given, **{counter: str(value) for counter, value in counters.items()}}
+        world = {**fields, **{counter: str(value) for counter, value in counters.items()}}
         outcome, transition = scenario_step(machine, state, event, world, index)
         if transition is not None:
             state = transition.target
             apply_effects(transition, counters)
+            fields.update(transition.updates)
         elif outcome != "ignored":
             return f": {event} is not accepted in {state}"
     return "" if state == scenario.expect else f" ends in {state} instead of {scenario.expect}"

@@ -27,6 +27,7 @@ class EntityDefinition:
     field_notes: dict[str, str] = field(default_factory=dict)
     field_labels: dict[str, str] = field(default_factory=dict)
     fixed: list[str] = field(default_factory=list)
+    starts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -105,6 +106,7 @@ class Transition:
     conditions: list["Formula"] = field(default_factory=list)
     effects: list[tuple[str, str, int]] = field(default_factory=list)
     after: str = ""
+    updates: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def actor(self) -> str:
@@ -317,3 +319,4 @@ class Module:
     scope_lines: dict[str, int] = field(default_factory=dict)
     variables: list[EnumDefinition] = field(default_factory=list)
     rigid: list[str] = field(default_factory=list)
+    mutable: dict[str, str] = field(default_factory=dict)

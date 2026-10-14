@@ -112,9 +112,11 @@ class Writer:
     def outcome(self, machine: Machine, item: Transition | Handling) -> str:
         if isinstance(item, Handling):
             return item.kind
-        updates = [f"{machine.name}' = {item.target}"] if item.target != item.source or not item.effects else []
+        moves = item.target != item.source or not (item.effects or item.updates)
+        updates = [f"{machine.name}' = {item.target}"] if moves else []
         for counter, operator, amount in item.effects:
             updates.append(f"{counter}' = {amount}" if operator == "=" else f"{counter}' = {counter} + {amount}")
+        updates += [f"{path}' = {value}" for path, value in item.updates]
         return " & ".join(updates)
 
     def machine(self, machine: Machine) -> None:
@@ -154,7 +156,9 @@ class Writer:
         for entity in module.entities:
             key = f" key ({', '.join(entity.key)})" if entity.key else ""
             lines = [f"{entity.name}{key}{' passive' if entity.passive else ''} {{"]
-            lines += [f"    {name}: {kind}{' fixed' if name in entity.fixed else ''}" for name, kind in entity.fields]
+            marks = {name: " fixed" for name in entity.fixed}
+            marks.update({name: f" var init {start}" for name, start in entity.starts.items()})
+            lines += [f"    {name}: {kind}{marks.get(name, '')}" for name, kind in entity.fields]
             self.section([*lines, "}"] if entity.fields else [lines[0] + "}"])
             self.text(entity.name, entity.label, why=entity.why)
             for name, _ in entity.fields:

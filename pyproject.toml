@@ -15,3 +15,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pdl"]
+
+[tool.pyright]
+include = ["src/pdl"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"

@@ -4,6 +4,7 @@ import operator
 from collections import deque
 from dataclasses import dataclass
 from itertools import product
+from typing import assert_never
 
 from .ground import expand
 from .solver import Block, Step, TransitionSystem, conflicting_laws, find_world
@@ -14,6 +15,7 @@ from .model import (
     Can,
     Derivation,
     EnumDefinition,
+    Exists,
     ForAll,
     Formula,
     Handling,
@@ -75,9 +77,9 @@ class System:
 
     def path(self, config: tuple) -> str:
         path = []
-        while self.seen[config] is not None:
+        while (previous := self.seen[config]) is not None:
             path.append(self.steps[config])
-            config = self.seen[config]
+            config = previous
         route = " -> ".join(reversed(path)) or "the start"
         return f"{route} with {describe(dict(zip(self.rigid, config[2])))}" if self.rigid else route
 
@@ -172,7 +174,9 @@ def evaluate(formula: Formula, assignment: dict[str, str], bound: dict[str, str]
         enum = index.enums.get(formula.enum)
         values = enum.values if enum is not None else []
         return all(evaluate(formula.body, assignment, {**bound, formula.variable: v}, index) for v in values)
-    raise TypeError(f"{type(formula).__name__} has no value in a single state")
+    if isinstance(formula, (Exists, Can)):
+        raise TypeError(f"{type(formula).__name__} has no value in a single state")
+    assert_never(formula)
 
 
 def free_enums(formula: Formula, index: Index, bound: frozenset[str] = frozenset()) -> set[str]:
@@ -188,8 +192,10 @@ def free_enums(formula: Formula, index: Index, bound: frozenset[str] = frozenset
         return free_enums(formula.premise, index, bound) | free_enums(formula.conclusion, index, bound)
     elif isinstance(formula, ForAll):
         return free_enums(formula.body, index, bound | {formula.variable})
-    else:
+    elif isinstance(formula, (Exists, Can)):
         return set()
+    else:
+        assert_never(formula)
     return {term for term in terms if term in index.enums and term not in bound}
 
 
@@ -379,11 +385,13 @@ def check_formula(
     elif isinstance(formula, Implies):
         check_formula(formula.premise, bound, index, line, findings)
         check_formula(formula.conclusion, bound, index, line, findings)
-    else:
+    elif isinstance(formula, (ForAll, Exists)):
         if formula.enum not in index.enums:
             findings.append(Finding("UNDEFINED", f"enum {formula.enum} of the quantifier is not defined", line))
             return
         check_formula(formula.body, {**bound, formula.variable: formula.enum}, index, line, findings)
+    else:
+        assert_never(formula)
 
 
 def check_invariants(module: Module, index: Index) -> list[Finding]:
@@ -665,9 +673,9 @@ def check_guards(
         variables = set().union(*(guard_enums(item.conditions, index) for item in (*group, *held)))
         assignments = worlds(index, variables)
         if assignments is None:
-            moves = [And(transition.conditions) for transition in group]
-            holds = [And(handling.conditions) for handling in held]
-            clashes = [
+            moves: list[Formula] = [And(transition.conditions) for transition in group]
+            holds: list[Formula] = [And(handling.conditions) for handling in held]
+            clashes: list[Formula] = [
                 And([moves[first], moves[second]])
                 for first in range(len(group))
                 for second in range(first + 1, len(group))
@@ -1144,7 +1152,9 @@ def solved_path(route: list[str], state: dict[str, str], rigid: list[str]) -> st
 
 def solved_assertions(module: Module, index: Index) -> list[Finding]:
     system = index.symbolic
-    findings = []
+    findings: list[Finding] = []
+    if system is None:
+        return findings
     for assertion in module.assertions:
         label = f"assertion {assertion.name}"
         if outer_cans(assertion.formula):
@@ -1176,7 +1186,9 @@ def outer_cans(formula: Formula) -> list[Can]:
         return outer_cans(formula.premise) + outer_cans(formula.conclusion)
     if isinstance(formula, ForAll):
         return outer_cans(formula.body)
-    return []
+    if isinstance(formula, (Atom, InSet, Exists)):
+        return []
+    assert_never(formula)
 
 
 def check_assertions(module: Module, index: Index) -> list[Finding]:
@@ -1184,7 +1196,7 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
     if not module.assertions:
         return []
     if system is None:
-        return solved_assertions(module, index) if index.symbolic is not None else []
+        return solved_assertions(module, index)
     findings: list[Finding] = []
     scopes: dict[int, list[dict[str, str]] | None] = {}
     can_sets: dict[int, set[tuple]] = {}
@@ -1206,7 +1218,9 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
             return Implies(ground(formula.premise, config), ground(formula.conclusion, config))
         if isinstance(formula, ForAll):
             return ForAll(formula.variable, formula.enum, ground(formula.body, config))
-        return formula
+        if isinstance(formula, (Atom, InSet, Exists)):
+            return formula
+        assert_never(formula)
 
     def states_of(formula: Formula, config: tuple) -> list[tuple[dict[str, str], bool]]:
         grounded = ground(formula, config)

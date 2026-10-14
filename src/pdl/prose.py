@@ -1,5 +1,7 @@
 """Deterministic sentences for rules, built from labels and Korean particle rules."""
 
+from typing import assert_never
+
 from .model import And, Atom, Can, Exists, ForAll, Formula, Implies, InSet, Module, Not, Or, Rule
 
 HANGUL_FIRST = 0xAC00
@@ -104,9 +106,11 @@ def formula_text(formula: Formula, parent: int = 0) -> str:
     level = PRECEDENCE[type(formula)]
     if isinstance(formula, Implies):
         text = f"{formula_text(formula.premise, level + 1)} ⇒ {formula_text(formula.conclusion, level)}"
-    else:
+    elif isinstance(formula, (And, Or)):
         joiner = " ∧ " if isinstance(formula, And) else " ∨ "
         text = joiner.join(formula_text(operand, level + 1) for operand in formula.operands)
+    else:
+        assert_never(formula)
     return f"({text})" if parent > level else text
 
 

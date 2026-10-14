@@ -1,6 +1,7 @@
 """Source text of a module in the current syntax."""
 
 import re
+from typing import assert_never
 
 from .model import (
     And,
@@ -42,9 +43,11 @@ def formula_source(formula: Formula, parent: int = 0) -> str:
     level = PRECEDENCE[type(formula)]
     if isinstance(formula, Implies):
         text = f"{formula_source(formula.premise, level + 1)} => {formula_source(formula.conclusion, level)}"
-    else:
+    elif isinstance(formula, (And, Or)):
         joiner = " & " if isinstance(formula, And) else " | "
         text = joiner.join(formula_source(operand, level + 1) for operand in formula.operands)
+    else:
+        assert_never(formula)
     return f"({text})" if parent > level else text
 
 

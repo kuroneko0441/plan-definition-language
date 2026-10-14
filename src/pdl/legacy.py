@@ -506,7 +506,8 @@ class Parser:
             elif token.kind == "word" and token.value == "counter":
                 self.advance()
                 counter = self.word()
-                counter_label = self.string() if self.peek() is not None and self.peek().kind == "string" else ""
+                following = self.peek()
+                counter_label = self.string() if following is not None and following.kind == "string" else ""
                 self.expect("max")
                 maximum = self.word()
                 machine.counters[counter] = int(maximum) if maximum.isdigit() else 0

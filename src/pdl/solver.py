@@ -1,22 +1,26 @@
 """Z3 queries that replace enumeration when a check is too large to enumerate."""
 
 import operator
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import assert_never
 
 import z3
 from z3 import z3util
 
-from .model import And, Atom, Call, ForAll, Formula, Implies, InSet, Law, Not, Or, Reference, Term
+from .model import And, Atom, Call, Can, Exists, ForAll, Formula, Implies, InSet, Law, Not, Or, Reference, Term
 
 ORDERINGS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
 Environment = dict[str, z3.ArithRef]
+Constraint = z3.BoolRef | z3.Probe | bool
+Number = z3.ArithRef | int
 
 
 class Encoder:
     def __init__(self, enums: dict[str, list[str]]):
         self.enums = enums
 
-    def domain(self, name: str, variable: z3.ArithRef) -> z3.BoolRef:
+    def domain(self, name: str, variable: z3.ArithRef) -> Constraint:
         return z3.And(variable >= 0, variable < len(self.enums[name]))
 
     def side(self, term: str, environment: Environment, bound: dict[str, str]) -> tuple[bool, str]:
@@ -24,7 +28,7 @@ class Encoder:
             return False, bound[term]
         return term in environment, term
 
-    def number(self, variable: bool, text: str, environment: Environment) -> z3.ArithRef | None:
+    def number(self, variable: bool, text: str, environment: Environment) -> Number | None:
         if not variable:
             return z3.IntVal(int(text)) if text.isdigit() else None
         values = self.enums[text]
@@ -32,7 +36,7 @@ class Encoder:
             return None
         return z3.Sum([z3.If(environment[text] == position, int(value), 0) for position, value in enumerate(values)])
 
-    def equal(self, left: tuple[bool, str], right: tuple[bool, str], environment: Environment) -> z3.BoolRef:
+    def equal(self, left: tuple[bool, str], right: tuple[bool, str], environment: Environment) -> Constraint:
         if not left[0] and right[0]:
             left, right = right, left
         if not left[0]:
@@ -49,16 +53,17 @@ class Encoder:
             ]
         )
 
-    def encode(self, formula: Formula, environment: Environment, bound: dict[str, str] | None = None) -> z3.BoolRef:
+    def encode(self, formula: Formula, environment: Environment, bound: dict[str, str] | None = None) -> Constraint:
         bound = bound or {}
         if isinstance(formula, Atom):
             left = self.side(formula.left, environment, bound)
             right = self.side(formula.right, environment, bound)
             if formula.operator in ORDERINGS:
-                numbers = [self.number(*left, environment), self.number(*right, environment)]
-                if None in numbers:
+                smaller = self.number(*left, environment)
+                larger = self.number(*right, environment)
+                if smaller is None or larger is None:
                     return z3.BoolVal(False)
-                return ORDERINGS[formula.operator](*numbers)
+                return ORDERINGS[formula.operator](smaller, larger)
             same = self.equal(left, right, environment)
             return same if formula.operator == "=" else z3.Not(same)
         if isinstance(formula, InSet):
@@ -80,7 +85,9 @@ class Encoder:
         if isinstance(formula, ForAll):
             values = self.enums.get(formula.enum, [])
             return z3.And([self.encode(formula.body, environment, {**bound, formula.variable: value}) for value in values])
-        raise TypeError(f"{type(formula).__name__} has no value in a single state")
+        if isinstance(formula, (Exists, Can)):
+            raise TypeError(f"{type(formula).__name__} has no value in a single state")
+        assert_never(formula)
 
 
 def smallest_model(
@@ -140,24 +147,24 @@ class TransitionSystem:
     def frame(self, tag: str) -> Environment:
         return {name: z3.Int(f"{name}@{tag}") for name in self.states}
 
-    def bounded(self, environment: Environment) -> list[z3.BoolRef]:
+    def bounded(self, environment: Environment) -> list[Constraint]:
         return [self.encoder.domain(name, variable) for name, variable in environment.items()]
 
-    def block(self, block: Block, environment: Environment) -> tuple[list[z3.BoolRef], Environment]:
+    def block(self, block: Block, environment: Environment) -> tuple[list[Constraint], Environment]:
         names, formulas = block
         self.fresh += 1
         world = {name: z3.Int(f"{name}#{self.fresh}") for name in names}
         merged = {**environment, **world}
         return [*self.bounded(world), *(self.encoder.encode(formula, merged) for formula in formulas)], world
 
-    def opening(self, environment: Environment) -> list[z3.BoolRef]:
+    def opening(self, environment: Environment) -> list[Constraint]:
         values = self.encoder.enums
         constraints = [environment[name] == values[name].index(value) for name, value in self.start.items()]
         for block in self.openings:
             constraints += self.block(block, environment)[0]
         return [*self.bounded(environment), *constraints]
 
-    def move(self, step: Step, before: Environment, after: Environment) -> list[z3.BoolRef]:
+    def move(self, step: Step, before: Environment, after: Environment) -> list[Constraint]:
         values = self.encoder.enums[step.machine]
         constraints, world = self.block(step.guard, before)
         constraints += [before[step.machine] == values.index(step.source), after[step.machine] == values.index(step.target)]
@@ -186,7 +193,7 @@ class TransitionSystem:
         fixedpoint.register_relation(reach, failure)
         before, after = self.frame("before"), self.frame("after")
 
-        def rule(head: z3.BoolRef, body: list[z3.BoolRef]) -> None:
+        def rule(head: z3.ExprRef, body: Sequence[z3.ExprRef | Constraint]) -> None:
             implication = z3.Implies(z3.And(body), head)
             variables = [variable for variable in z3util.get_vars(implication) if z3.is_int(variable)]
             fixedpoint.add_rule(z3.ForAll(variables, implication) if variables else implication)

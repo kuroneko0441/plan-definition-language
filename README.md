@@ -59,6 +59,7 @@ The checker uses the Z3 solver, so a clone needs the `z3-solver` package.
 In a clone, `python3 -m pdl` runs the compiler from the `src` directory, and the tests run from there too:
 
 ```sh
+pyright
 cd src
 python3 -m unittest discover -s tests -t .
 ```

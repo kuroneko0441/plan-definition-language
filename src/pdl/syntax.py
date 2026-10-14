@@ -53,6 +53,7 @@ COMPARISON_OPERATORS = ("=", "!=", "<", "<=", ">", ">=")
 LAW_OPERATORS = ("=", "<", ">", "<=", ">=")
 TEXT_ATTRIBUTES = ("why", "stored", "after", "mixed")
 IMPORTED_KINDS = ("enum", "entity", "term", "actor", "action", "external")
+LABELED = (TermDefinition, EnumDefinition, EntityDefinition, Declaration, Machine, Constant, Derivation, Screen)
 
 
 class PdlSyntaxError(Exception):
@@ -706,12 +707,21 @@ class Parser:
             seen = self.named_texts.get(key[0], 0)
             self.named_texts[key[0]] = seen + 1
             owner = candidates[min(seen, len(candidates) - 1)]
-            if label:
+            unused = [name for name in text if name not in ("label", "why", "mixed")]
+            if label and isinstance(owner, LABELED):
                 owner.label = label
-            if why:
+            elif label:
+                unused.append("a label")
+            if why and not isinstance(owner, Declaration):
                 owner.why = why
-            if "mixed" in text:
+            elif why:
+                unused.append("why")
+            if "mixed" in text and isinstance(owner, Derivation):
                 owner.mixed_label = text["mixed"]
+            elif "mixed" in text:
+                unused.append("mixed")
+            if unused:
+                raise PdlSyntaxError(entry.line, f"text gives {key[0]} {', '.join(unused)}, which it does not take")
             return
         member = key[1]
         owner = next((candidate for candidate in candidates if self.holds(candidate, member)), candidates[0])

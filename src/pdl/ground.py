@@ -1,6 +1,7 @@
 """Expansion of entity instances, paths, and quantifiers into formulas over finite variables."""
 
 from dataclasses import dataclass, replace
+from typing import assert_never
 
 from .model import (
     And,
@@ -57,7 +58,9 @@ def terms(formula: Formula) -> list[str]:
         return [term for operand in formula.operands for term in terms(operand)]
     if isinstance(formula, Implies):
         return terms(formula.premise) + terms(formula.conclusion)
-    return terms(formula.body)
+    if isinstance(formula, (ForAll, Exists)):
+        return terms(formula.body)
+    assert_never(formula)
 
 
 def quantifiers(formula: Formula) -> list[ForAll | Exists]:
@@ -69,7 +72,9 @@ def quantifiers(formula: Formula) -> list[ForAll | Exists]:
         return [found for operand in formula.operands for found in quantifiers(operand)]
     if isinstance(formula, Implies):
         return quantifiers(formula.premise) + quantifiers(formula.conclusion)
-    return []
+    if isinstance(formula, (Atom, InSet)):
+        return []
+    assert_never(formula)
 
 
 class Expander:
@@ -243,6 +248,8 @@ class Expander:
             return Implies(
                 self.expand(formula.premise, environment, line), self.expand(formula.conclusion, environment, line)
             )
+        if not isinstance(formula, (ForAll, Exists)):
+            assert_never(formula)
         if formula.enum in self.atoms:
             values = self.atoms[formula.enum]
         elif formula.enum in self.enums:

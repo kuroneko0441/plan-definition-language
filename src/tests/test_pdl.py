@@ -1181,6 +1181,9 @@ class SyntaxTest(unittest.TestCase):
         with self.assertRaises(PdlSyntaxError) as raised:
             syntax.parse_module(BOOKING.replace('Staff "직원"', 'Stuff "직원"'))
         self.assertIn("Stuff, which is not defined", str(raised.exception))
+        with self.assertRaises(PdlSyntaxError) as raised:
+            syntax.parse_module(BOOKING.replace("confirmed_is_paid why", 'confirmed_is_paid "확정" why'))
+        self.assertIn("gives confirmed_is_paid a label, which it does not take", str(raised.exception))
 
     def test_symbols_are_aliases_of_the_operators(self):
         text = BOOKING.replace(" & ", " ∧ ").replace(" => ", " ⇒ ").replace(" in {", " ∈ {").replace("->", "→")

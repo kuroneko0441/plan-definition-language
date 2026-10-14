@@ -1,9 +1,10 @@
 """Tokenizer and parser for plan definition language source text."""
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, TypeVar
 
 from .model import (
     And,
@@ -19,6 +20,7 @@ from .model import (
     Exists,
     ForAll,
     Formula,
+    Function,
     Handling,
     Implies,
     InSet,
@@ -29,6 +31,7 @@ from .model import (
     Module,
     Not,
     Or,
+    Predicate,
     Premise,
     Reference,
     Rule,
@@ -54,6 +57,9 @@ LAW_OPERATORS = ("=", "<", ">", "<=", ">=")
 TEXT_ATTRIBUTES = ("why", "stored", "after", "mixed")
 IMPORTED_KINDS = ("enum", "entity", "term", "actor", "action", "external")
 LABELED = (TermDefinition, EnumDefinition, EntityDefinition, Declaration, Machine, Constant, Derivation, Screen)
+
+
+Parsed = TypeVar("Parsed")
 
 
 class PdlSyntaxError(Exception):
@@ -143,6 +149,13 @@ class Parser:
         self.texts: list[TextEntry] = []
         self.tags: dict[tuple[str, ...], list] = {}
         self.named_texts: dict[str, int] = {}
+        self.shorthands: dict[str, tuple[str, int]] = {}
+        for position, token in enumerate(tokens[:-2]):
+            named = tokens[position + 1].kind == "word" and tokens[position + 2].value == "("
+            if token.kind == "word" and token.value in ("pred", "fun") and named:
+                self.shorthands.setdefault(tokens[position + 1].value, (token.value, position + 2))
+        self.arguments: dict[str, str] = {}
+        self.expanding: list[str] = []
 
     def peek(self, offset: int = 0) -> Token | None:
         position = self.index + offset
@@ -214,8 +227,42 @@ class Parser:
     def assumptions(self) -> list[str]:
         return self.comma_words() if self.accept("assuming") else []
 
+    def parameters(self) -> list[str]:
+        self.expect("(")
+        words = [] if self.at(")") else self.comma_words()
+        self.expect(")")
+        return words
+
+    def apply(self, name: str, kind: str, body: Callable[[], Parsed]) -> Parsed:
+        line = self.expect("(").line
+        found, position = self.shorthands[name]
+        if found != kind:
+            raise PdlSyntaxError(line, f"{name} is a {found}, which cannot stand in the place of a {kind}")
+        if name in self.expanding:
+            raise PdlSyntaxError(line, f"{name} is defined in terms of itself")
+        values = [] if self.at(")") else [self.path()]
+        while self.accept(","):
+            values.append(self.path())
+        self.expect(")")
+        saved = (self.index, self.arguments, self.temporal)
+        self.index = position
+        names = self.parameters()
+        if len(names) != len(values):
+            raise PdlSyntaxError(line, f"{name} takes {len(names)} arguments but is given {len(values)}")
+        self.expect(":")
+        self.arguments, self.temporal = dict(zip(names, values)), False
+        self.expanding.append(name)
+        expanded = body()
+        self.expanding.pop()
+        self.index, self.arguments, self.temporal = saved
+        return expanded
+
     def path(self) -> str:
         names = [self.word()]
+        if names[0] in self.shorthands and self.at("("):
+            names = [self.apply(names[0], "fun", self.path)]
+        elif names[0] in self.arguments:
+            names = [self.arguments[names[0]]]
         while self.accept("."):
             names.append(self.word())
         return ".".join(names)
@@ -251,12 +298,20 @@ class Parser:
                 variable = self.word()
                 self.expect("in")
                 domain = self.word()
-                self.expect(":")
-                return quantifier(variable, domain, self.implication())
+                line = self.expect(":").line
+                outer = self.arguments
+                if any(value.split(".")[0] == variable for name, value in outer.items() if name != variable):
+                    raise PdlSyntaxError(line, f"{variable} is bound in a definition that is also given {variable}")
+                self.arguments = {name: value for name, value in outer.items() if name != variable}
+                body = self.implication()
+                self.arguments = outer
+                return quantifier(variable, domain, body)
         if self.accept("("):
             formula = self.implication()
             self.expect(")")
             return formula
+        if token is not None and self.shorthands.get(token.value, ("", 0))[0] == "pred" and self.at("(", 1):
+            return self.apply(self.word(), "pred", self.implication)
         left = self.path()
         if self.accept("in"):
             return InSet(left, self.braced_words())
@@ -279,6 +334,8 @@ class Parser:
             "assume": self.premise,
             "inv": self.invariant,
             "prop": self.assertion,
+            "pred": self.shorthand,
+            "fun": self.shorthand,
             "law": self.law,
             "derive": self.derive,
             "screen": self.screen,
@@ -472,6 +529,19 @@ class Parser:
         name = self.word()
         self.expect(":")
         return line, name
+
+    def shorthand(self, module: Module) -> None:
+        kind = self.advance().value
+        token = self.advance()
+        names = self.parameters()
+        self.expect(":")
+        self.expanding.append(token.value)
+        if kind == "pred":
+            module.predicates.append(Predicate(token.line, token.value, names, self.implication()))
+        else:
+            module.functions.append(Function(token.line, token.value, names, self.path()))
+        self.expanding.pop()
+        module.definitions.append((kind, token.value, token.line))
 
     def premise(self, module: Module) -> None:
         line, name = self.named_formula("assume")

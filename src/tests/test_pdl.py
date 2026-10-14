@@ -1023,6 +1023,60 @@ class FieldUpdateTest(unittest.TestCase):
         self.assertIn("paid: Flag [starts as: No]", document)
 
 
+SHORTHANDS = PARCEL.replace("this.paid = Yes", "is_paid(this)") + (
+    "pred is_paid(p): p.paid = Yes\n"
+    "pred settled(p): bill(p) = Settled & is_paid(p)\n"
+    "fun bill(p): p.Billing\n"
+    "prop named: always all q in Parcel: q.Flow = Shipped => settled(q)\n"
+)
+
+
+class ShorthandTest(unittest.TestCase):
+    def error(self, text: str) -> str:
+        with self.assertRaises(PdlSyntaxError) as raised:
+            syntax.parse_module(text)
+        return str(raised.exception)
+
+    def test_a_pred_and_a_fun_stand_for_their_bodies(self):
+        module = syntax.parse_module(SHORTHANDS)
+        self.assertEqual([f for f in check(module) if f.blocking], [])
+        named = module.assertions[-1].formula
+        plain = syntax.parse_module(
+            PARCEL + "prop named: always all q in Parcel: q.Flow = Shipped => q.Billing = Settled & q.paid = Yes\n"
+        )
+        self.assertEqual(named, plain.assertions[-1].formula)
+        self.assertEqual(module.machines[0].transitions[0].conditions, plain.machines[0].transitions[0].conditions)
+
+    def test_a_pred_that_fails_is_reported_through_the_property_that_uses_it(self):
+        text = SHORTHANDS.replace("this.paid' = Yes", "this.paid' = No")
+        kinds = [f.kind for f in check(syntax.parse_module(text)) if f.blocking]
+        self.assertEqual(kinds, ["UNREACHABLE", "ASSERTION_FAILED"])
+
+    def test_a_pred_without_parameters_names_a_condition(self):
+        text = SHORTHANDS + "pred first_paid(): is_paid(Parcel1)\nprop first: reachable first_paid()\n"
+        self.assertEqual([f for f in check(syntax.parse_module(text)) if f.blocking], [])
+
+    def test_a_definition_cannot_use_itself(self):
+        text = SHORTHANDS + "pred a(p): b(p)\npred b(p): a(p)\n"
+        self.assertIn("a is defined in terms of itself", self.error(text))
+
+    def test_the_number_and_the_kind_of_a_use_are_checked(self):
+        self.assertIn("is_paid takes 1 arguments but is given 2", self.error(SHORTHANDS + "inv i: is_paid(Parcel1, Parcel2)\n"))
+        self.assertIn("is_paid is a pred", self.error(SHORTHANDS + "inv i: Parcel1.paid = is_paid(Parcel1)\n"))
+
+    def test_an_argument_is_not_captured_by_a_quantifier_of_the_definition(self):
+        text = SHORTHANDS + "pred alone(p): all q in Parcel: q.Flow = Packed | is_paid(p)\nprop c: always all q in Parcel: alone(q)\n"
+        self.assertIn("q is bound in a definition that is also given q", self.error(text))
+
+    def test_definitions_are_written_back_and_listed(self):
+        module = syntax.parse_module(SHORTHANDS)
+        text = to_text(module)
+        self.assertIn("pred settled(p): p.Billing = Settled & p.paid = Yes", text)
+        self.assertIn("fun bill(p): p.Billing", text)
+        self.assertEqual(to_text(syntax.parse_module(text)), text)
+        self.assertIn("- is_paid(p): `p.paid = Yes`", render(module, check(module)))
+
+
 LOGIN = (
     "module m\nexternal Sys\nconst limit in 1..4\n"
     "machine Login { states Active, Locked\ninitial Active\nterminal Locked\nevent Fail\ncounter Tries max limit\n"

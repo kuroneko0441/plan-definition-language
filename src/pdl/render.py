@@ -533,6 +533,8 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
             f"- {law.identifier}: `{term_text(law.left)} {law.operator} {term_text(law.right)}`"
             for law in module.laws
         ]
+        + [f"- {item.name}({', '.join(item.parameters)}): `{formula_text(item.formula)}`" for item in module.predicates]
+        + [f"- {item.name}({', '.join(item.parameters)}): `{item.path}`" for item in module.functions]
         + [f"- {item.name}: `{formula_text(item.formula)}`" for item in (*module.invariants, *module.premises)]
         + [f"- {item.name}: `{item.mode} {formula_text(item.formula)}`" for item in module.assertions]
     )

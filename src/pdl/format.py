@@ -202,6 +202,9 @@ class Writer:
             )
             self.text(law.identifier, why=law.why)
         self.section(lines)
+        lines = [f"pred {item.name}({', '.join(item.parameters)}): {formula_source(item.formula)}" for item in module.predicates]
+        lines += [f"fun {item.name}({', '.join(item.parameters)}): {item.path}" for item in module.functions]
+        self.section(lines)
         lines = []
         for derivation in module.derivations:
             form = (

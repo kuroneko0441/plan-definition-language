@@ -15,12 +15,15 @@ Billing.Pay @Gateway {
     else reject
 }
 Flow.Ship @Courier {
-    Flow = Packed & this.paid = Yes => Flow' = Shipped
+    Flow = Packed & is_paid(this) => Flow' = Shipped
     else reject as unpaid
 }
 
-prop shipped_is_paid: always all p in Parcel: p.Flow = Shipped => p.paid = Yes
-prop stays_paid: always all p in Parcel: p.Billing = Settled => p.paid = Yes
+pred is_paid(p): p.paid = Yes
+fun bill(p): p.Billing
+
+prop shipped_is_paid: always all p in Parcel: p.Flow = Shipped => is_paid(p)
+prop stays_paid: always all p in Parcel: bill(p) = Settled => is_paid(p)
 prop both_ship: reachable all p in Parcel: p.Flow = Shipped
 run pay_first: Billing = Open -> Pay -> Billing = Settled
 

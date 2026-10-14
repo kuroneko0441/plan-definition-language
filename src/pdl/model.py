@@ -265,6 +265,22 @@ class Invariant:
 
 
 @dataclass
+class Predicate:
+    line: int
+    name: str
+    parameters: list[str]
+    formula: Formula
+
+
+@dataclass
+class Function:
+    line: int
+    name: str
+    parameters: list[str]
+    path: str
+
+
+@dataclass
 class Constant:
     line: int
     name: str
@@ -320,3 +336,5 @@ class Module:
     variables: list[EnumDefinition] = field(default_factory=list)
     rigid: list[str] = field(default_factory=list)
     mutable: dict[str, str] = field(default_factory=dict)
+    predicates: list[Predicate] = field(default_factory=list)
+    functions: list[Function] = field(default_factory=list)

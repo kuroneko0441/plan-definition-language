@@ -56,6 +56,8 @@ stateDiagram-v2
 
 ### 식
 
+- is_paid(p): `p.paid = Yes`
+- bill(p): `p.Billing`
 - shipped_is_paid: `always ∀ p ∈ Parcel : p.Flow = Shipped ⇒ p.paid = Yes`
 - stays_paid: `always ∀ p ∈ Parcel : p.Billing = Settled ⇒ p.paid = Yes`
 - both_ship: `reachable ∀ p ∈ Parcel : p.Flow = Shipped`

@@ -25,6 +25,11 @@ fun bill(p): p.Billing
 prop shipped_is_paid: always all p in Parcel: p.Flow = Shipped => is_paid(p)
 prop stays_paid: always all p in Parcel: bill(p) = Settled => is_paid(p)
 prop both_ship: reachable all p in Parcel: p.Flow = Shipped
+
+fair Billing.Pay
+fair Flow.Ship
+prop all_ship: eventually all p in Parcel: p.Flow = Shipped
+prop paid_ships: always all p in Parcel: is_paid(p) => eventually p.Flow = Shipped
 run pay_first: Billing = Open -> Pay -> Billing = Settled
 
 text {
@@ -48,4 +53,6 @@ text {
     shipped_is_paid why "발송된 소포는 모두 결제된 소포이다."
     stays_paid why "결제된 소포의 결제 여부는 되돌아가지 않는다."
     both_ship why "두 소포가 모두 발송되는 경우가 있다."
+    all_ship why "결제와 발송이 미뤄지지 않으면 모든 소포는 결국 발송된다."
+    paid_ships why "결제된 소포는 결국 발송된다."
 }

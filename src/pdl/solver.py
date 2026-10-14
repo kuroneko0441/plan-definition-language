@@ -8,7 +8,7 @@ import z3
 from z3 import z3util
 
 from .kernel import Action, Assign
-from .model import And, Atom, Call, Can, Exists, ForAll, Formula, Implies, InSet, Law, Not, Or, Reference, Term
+from .model import And, Atom, Call, Can, Eventually, Exists, ForAll, Formula, Implies, InSet, Law, Not, Or, Reference, Term
 
 ORDERINGS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
 Environment = dict[str, z3.ArithRef]
@@ -85,7 +85,7 @@ class Encoder:
         if isinstance(formula, ForAll):
             values = self.enums.get(formula.enum, [])
             return z3.And([self.encode(formula.body, environment, {**bound, formula.variable: value}) for value in values])
-        if isinstance(formula, (Exists, Can)):
+        if isinstance(formula, (Exists, Can, Eventually)):
             raise TypeError(f"{type(formula).__name__} has no value in a single state")
         assert_never(formula)
 

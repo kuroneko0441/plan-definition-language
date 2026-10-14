@@ -8,6 +8,7 @@ from .model import (
     Atom,
     Can,
     EnumDefinition,
+    Eventually,
     Exists,
     ForAll,
     Formula,
@@ -53,7 +54,7 @@ def terms(formula: Formula) -> list[str]:
         return [formula.left, formula.right]
     if isinstance(formula, InSet):
         return [formula.left]
-    if isinstance(formula, (Not, Can)):
+    if isinstance(formula, (Not, Can, Eventually)):
         return terms(formula.operand)
     if isinstance(formula, (And, Or)):
         return [term for operand in formula.operands for term in terms(operand)]
@@ -67,7 +68,7 @@ def terms(formula: Formula) -> list[str]:
 def quantifiers(formula: Formula) -> list[ForAll | Exists]:
     if isinstance(formula, (ForAll, Exists)):
         return [formula, *quantifiers(formula.body)]
-    if isinstance(formula, (Not, Can)):
+    if isinstance(formula, (Not, Can, Eventually)):
         return quantifiers(formula.operand)
     if isinstance(formula, (And, Or)):
         return [found for operand in formula.operands for found in quantifiers(operand)]
@@ -247,7 +248,7 @@ class Expander:
             return self.compare(formula, environment, line)
         if isinstance(formula, InSet):
             return self.member(formula, environment, line)
-        if isinstance(formula, (Not, Can)):
+        if isinstance(formula, (Not, Can, Eventually)):
             return type(formula)(self.expand(formula.operand, environment, line))
         if isinstance(formula, (And, Or)):
             return type(formula)([self.expand(operand, environment, line) for operand in formula.operands])

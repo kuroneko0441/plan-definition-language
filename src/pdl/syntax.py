@@ -17,6 +17,7 @@ from .model import (
     Derivation,
     EntityDefinition,
     EnumDefinition,
+    Eventually,
     Exists,
     ForAll,
     Formula,
@@ -291,8 +292,10 @@ class Parser:
         token = self.peek()
         if self.temporal and self.accept("can"):
             return Can(self.unary())
-        if token is not None and token.kind == "word" and token.value == "can":
-            raise PdlSyntaxError(token.line, "can is allowed only inside prop")
+        if self.temporal and self.accept("eventually"):
+            return Eventually(self.unary())
+        if token is not None and token.kind == "word" and token.value in ("can", "eventually"):
+            raise PdlSyntaxError(token.line, f"{token.value} is allowed only inside prop")
         for keyword, quantifier in (("all", ForAll), ("some", Exists)):
             if self.accept(keyword):
                 variable = self.word()
@@ -334,6 +337,7 @@ class Parser:
             "assume": self.premise,
             "inv": self.invariant,
             "prop": self.assertion,
+            "fair": self.fairness,
             "pred": self.shorthand,
             "fun": self.shorthand,
             "law": self.law,
@@ -555,14 +559,20 @@ class Parser:
 
     def assertion(self, module: Module) -> None:
         line, name = self.named_formula("prop")
-        token = self.advance()
-        if token.kind != "word" or token.value not in ("always", "reachable"):
-            raise PdlSyntaxError(token.line, f"expected always or reachable but found {token.value!r}")
+        mode = "start" if self.at("eventually") else self.advance().value
+        if mode not in ("always", "reachable", "start"):
+            raise PdlSyntaxError(line, f"expected always, reachable, or eventually but found {mode!r}")
         self.temporal = True
         formula = self.implication()
         self.temporal = False
-        module.assertions.append(Assertion(line, name, token.value, formula))
+        module.assertions.append(Assertion(line, name, mode, formula))
         module.definitions.append(("assert", name, line))
+
+    def fairness(self, module: Module) -> None:
+        line = self.expect("fair").line
+        machine = self.word()
+        self.expect(".")
+        module.fair.append((line, machine, self.word()))
 
     def term(self) -> Term:
         name = self.word()

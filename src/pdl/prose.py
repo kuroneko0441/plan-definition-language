@@ -2,7 +2,7 @@
 
 from typing import assert_never
 
-from .model import And, Atom, Can, Exists, ForAll, Formula, Implies, InSet, Module, Not, Or, Rule
+from .model import And, Atom, Can, Eventually, Exists, ForAll, Formula, Implies, InSet, Module, Not, Or, Rule
 
 HANGUL_FIRST = 0xAC00
 HANGUL_LAST = 0xD7A3
@@ -97,8 +97,8 @@ def formula_text(formula: Formula, parent: int = 0) -> str:
         return f"{formula.left} ∈ {{{', '.join(formula.values)}}}"
     if isinstance(formula, Not):
         return f"¬({formula_text(formula.operand)})"
-    if isinstance(formula, Can):
-        return f"can ({formula_text(formula.operand)})"
+    if isinstance(formula, (Can, Eventually)):
+        return f"{'can' if isinstance(formula, Can) else 'eventually'} ({formula_text(formula.operand)})"
     if isinstance(formula, (ForAll, Exists)):
         symbol = "∀" if isinstance(formula, ForAll) else "∃"
         text = f"{symbol} {formula.variable} ∈ {formula.enum} : {formula_text(formula.body)}"

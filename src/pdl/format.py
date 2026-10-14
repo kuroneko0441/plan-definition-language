@@ -7,6 +7,7 @@ from .model import (
     And,
     Atom,
     Can,
+    Eventually,
     Exists,
     ForAll,
     Formula,
@@ -35,8 +36,9 @@ def formula_source(formula: Formula, parent: int = 0) -> str:
         return f"{formula.left} {formula.operator} {formula.right}"
     if isinstance(formula, InSet):
         return f"{formula.left} in {{{', '.join(formula.values)}}}"
-    if isinstance(formula, (Not, Can)):
-        return ("!" if isinstance(formula, Not) else "can ") + f"({formula_source(formula.operand)})"
+    if isinstance(formula, (Not, Can, Eventually)):
+        prefix = {Not: "!", Can: "can ", Eventually: "eventually "}[type(formula)]
+        return f"{prefix}({formula_source(formula.operand)})"
     if isinstance(formula, (ForAll, Exists)):
         keyword = "all" if isinstance(formula, ForAll) else "some"
         return f"({keyword} {formula.variable} in {formula.enum}: {formula_source(formula.body)})"
@@ -220,9 +222,10 @@ class Writer:
         self.section(lines)
         for machine in module.machines:
             self.machine(machine)
-        lines = []
+        lines = [f"fair {machine}.{event}" for _, machine, event in module.fair]
         for assertion in module.assertions:
-            lines.append(f"prop {assertion.name}: {assertion.mode} {formula_source(assertion.formula)}")
+            mode = "" if assertion.mode == "start" else f"{assertion.mode} "
+            lines.append(f"prop {assertion.name}: {mode}{formula_source(assertion.formula)}")
             self.text(assertion.name, why=assertion.why)
         for scenario in module.scenarios:
             start = " & ".join(

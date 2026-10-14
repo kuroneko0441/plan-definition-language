@@ -253,7 +253,12 @@ class Can:
     operand: "Formula"
 
 
-Formula = Union[Atom, InSet, Not, And, Or, Implies, ForAll, Exists, Can]
+@dataclass
+class Eventually:
+    operand: "Formula"
+
+
+Formula = Union[Atom, InSet, Not, And, Or, Implies, ForAll, Exists, Can, Eventually]
 
 
 @dataclass
@@ -336,5 +341,6 @@ class Module:
     variables: list[EnumDefinition] = field(default_factory=list)
     rigid: list[str] = field(default_factory=list)
     mutable: dict[str, str] = field(default_factory=dict)
+    fair: list[tuple[int, str, str]] = field(default_factory=list)
     predicates: list[Predicate] = field(default_factory=list)
     functions: list[Function] = field(default_factory=list)

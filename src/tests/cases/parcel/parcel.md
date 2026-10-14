@@ -43,11 +43,18 @@ stateDiagram-v2
 - 사건 순서: 결제
 - 기대 상태: 결제됨
 
+## 할 수 있는 동안에는 결국 일어난다고 가정한 사건
+
+- 결제: 결제
+- 배송: 발송
+
 ## 검증한 성질
 
 - 발송된 소포는 모두 결제된 소포이다.
 - 결제된 소포의 결제 여부는 되돌아가지 않는다.
 - 두 소포가 모두 발송되는 경우가 있다.
+- 결제와 발송이 미뤄지지 않으면 모든 소포는 결국 발송된다.
+- 결제된 소포는 결국 발송된다.
 
 ## 부록
 
@@ -61,6 +68,8 @@ stateDiagram-v2
 - shipped_is_paid: `always ∀ p ∈ Parcel : p.Flow = Shipped ⇒ p.paid = Yes`
 - stays_paid: `always ∀ p ∈ Parcel : p.Billing = Settled ⇒ p.paid = Yes`
 - both_ship: `reachable ∀ p ∈ Parcel : p.Flow = Shipped`
+- all_ship: `eventually (∀ p ∈ Parcel : p.Flow = Shipped)`
+- paid_ships: `always ∀ p ∈ Parcel : p.paid = Yes ⇒ eventually (p.Flow = Shipped)`
 
 ### 열거형
 

@@ -47,6 +47,7 @@ LABELS = {
         "computed": "계산되는 값",
         "invariants": "항상 성립하는 조건",
         "premises": "전제",
+        "fair": "할 수 있는 동안에는 결국 일어난다고 가정한 사건",
         "assertions": "검증한 성질",
         "screens": "화면",
         "enums": "열거형",
@@ -114,6 +115,7 @@ LABELS = {
         "computed": "Computed values",
         "invariants": "Invariants",
         "premises": "Premises",
+        "fair": "Events assumed to happen while they stay possible",
         "assertions": "Verified properties",
         "screens": "Screens",
         "enums": "Enumerations",
@@ -524,9 +526,19 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
         for invariant in module.invariants:
             lines.append(f"- {invariant.why or invariant.name}")
         lines.append("")
-    for key, items in (("premises", module.premises), ("assertions", module.assertions)):
+    machines = {machine.name: machine for machine in module.machines}
+    fair = [
+        f"{names.show(machine)}: {machines[machine].event_labels.get(event) or event if language == 'ko' else event}"
+        for _, machine, event in module.fair
+        if machine in machines
+    ]
+    for key, items in (
+        ("premises", [item.why or item.name for item in module.premises]),
+        ("fair", fair),
+        ("assertions", [item.why or item.name for item in module.assertions]),
+    ):
         if items:
-            lines += [f"## {labels[key]}", ""] + [f"- {item.why or item.name}" for item in items] + [""]
+            lines += [f"## {labels[key]}", ""] + [f"- {item}" for item in items] + [""]
     appendix = []
     formulas = (
         [
@@ -536,7 +548,10 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
         + [f"- {item.name}({', '.join(item.parameters)}): `{formula_text(item.formula)}`" for item in module.predicates]
         + [f"- {item.name}({', '.join(item.parameters)}): `{item.path}`" for item in module.functions]
         + [f"- {item.name}: `{formula_text(item.formula)}`" for item in (*module.invariants, *module.premises)]
-        + [f"- {item.name}: `{item.mode} {formula_text(item.formula)}`" for item in module.assertions]
+        + [
+            f"- {item.name}: `{'' if item.mode == 'start' else item.mode + ' '}{formula_text(item.formula)}`"
+            for item in module.assertions
+        ]
     )
     if formulas:
         appendix += [f"### {labels['formulas']}", ""] + formulas + [""]

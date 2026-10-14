@@ -1077,6 +1077,94 @@ class ShorthandTest(unittest.TestCase):
         self.assertIn("- is_paid(p): `p.paid = Yes`", render(module, check(module)))
 
 
+RETRY = """
+module m
+actor Clerk
+external Bank
+Transfer : {Draft, Sent, Failed, Done} init Draft final {Done}
+Transfer.Send @Clerk {
+    Transfer in {Draft, Failed} => Transfer' = Sent
+    else reject
+}
+Transfer.Settle @Bank {
+    Transfer = Sent => Transfer' = Done
+    else reject
+}
+Transfer.Bounce @Bank {
+    Transfer = Sent => Transfer' = Failed
+    else reject
+}
+"""
+
+
+class LivenessTest(unittest.TestCase):
+    def failures(self, text: str) -> list[str]:
+        return [f.message for f in check(syntax.parse_module(text)) if f.kind == "ASSERTION_FAILED"]
+
+    def test_nothing_has_to_happen_without_a_fair_event(self):
+        failures = self.failures(RETRY + "prop done: eventually Transfer = Done\n")
+        self.assertEqual(
+            failures, ["assertion done fails at the start (Transfer=Draft), because nothing has to happen in Transfer=Draft"]
+        )
+
+    def test_a_fair_event_is_taken_while_it_stays_enabled(self):
+        text = RETRY + "fair Transfer.Send\nprop sent: eventually Transfer = Sent\n"
+        self.assertEqual(self.failures(text), [])
+
+    def test_a_loop_that_takes_every_fair_event_can_repeat_forever(self):
+        text = RETRY + "fair Transfer.Send\nfair Transfer.Settle\nfair Transfer.Bounce\nprop done: eventually Transfer = Done\n"
+        self.assertEqual(
+            self.failures(text),
+            [
+                "assertion done fails at the start (Transfer=Draft),"
+                " because Transfer: Bounce, Transfer: Send can repeat forever after Transfer: Send"
+            ],
+        )
+
+    def test_a_fair_event_leaves_a_loop_that_never_takes_it(self):
+        text = RETRY.replace("Transfer' = Failed", "Transfer' = Sent") + "fair Transfer.Send\nfair Transfer.Settle\n"
+        self.assertEqual(self.failures(text + "prop done: eventually Transfer = Done\n"), [])
+
+    def test_eventually_answers_inside_always(self):
+        text = RETRY + "fair Transfer.Send\nprop again: always Transfer = Failed => eventually Transfer = Sent\n"
+        self.assertEqual(self.failures(text), [])
+        failures = self.failures(text.replace("fair Transfer.Send\n", ""))
+        self.assertEqual(len(failures), 1)
+        self.assertIn("fails after: Transfer: Send -> Transfer: Bounce (Transfer=Failed), because nothing has to happen", failures[0])
+
+    def test_a_fair_event_names_an_event_whose_guard_reads_no_free_value(self):
+        text = RETRY.replace("Transfer in {Draft, Failed} =>", "Transfer in {Draft, Failed} & Window = Open =>")
+        text += "Window : {Open, Shut}\nfair Transfer.Send\nfair Transfer.Cancel\nfair Other.Send\n"
+        text += "prop done: reachable Transfer = Done\n"
+        messages = [f.message for f in check(syntax.parse_module(text)) if f.kind == "UNDEFINED"]
+        self.assertEqual(
+            messages,
+            [
+                "fair Transfer.Send reads Window, which changes freely, so nothing makes the event happen",
+                "event Cancel of fair is not an event of Transfer",
+                "machine Other of fair is not defined",
+            ],
+        )
+
+    def test_eventually_needs_the_enumerated_state_space(self):
+        with mock.patch("pdl.checks.SYSTEM_LIMIT", 0):
+            findings = check(syntax.parse_module(RETRY + "prop done: eventually Transfer = Done\n"))
+        self.assertIn("assertion done uses eventually, which needs the enumerated state space", [f.message for f in findings])
+
+    def test_eventually_belongs_to_a_property(self):
+        with self.assertRaises(PdlSyntaxError):
+            syntax.parse_module(RETRY + "inv i: eventually Transfer = Done\n")
+
+    def test_fairness_and_eventually_are_written_back_and_rendered(self):
+        module = syntax.parse_module(RETRY + "fair Transfer.Send\nprop sent: eventually Transfer = Sent\n")
+        text = to_text(module)
+        self.assertIn("fair Transfer.Send\nprop sent: eventually (Transfer = Sent)", text)
+        self.assertEqual(to_text(syntax.parse_module(text)), text)
+        document = render(module, check(module), "en")
+        self.assertIn("## Events assumed to happen while they stay possible\n\n- Transfer: Send", document)
+        self.assertIn("- sent: `eventually (Transfer = Sent)`", document)
+
+
 LOGIN = (
     "module m\nexternal Sys\nconst limit in 1..4\n"
     "machine Login { states Active, Locked\ninitial Active\nterminal Locked\nevent Fail\ncounter Tries max limit\n"

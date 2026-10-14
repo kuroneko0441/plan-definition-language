@@ -2,7 +2,8 @@
 
 import operator
 from collections import deque
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from itertools import product
 from typing import assert_never
 
@@ -16,6 +17,7 @@ from .model import (
     Can,
     Derivation,
     EnumDefinition,
+    Eventually,
     Exists,
     ForAll,
     Formula,
@@ -67,6 +69,9 @@ class System:
     seen: dict[tuple, tuple | None]
     steps: dict[tuple, str]
     behind: dict[tuple, list[tuple]]
+    actions: list[Action]
+    ahead: dict[tuple, list[tuple[str, tuple]]] = field(default_factory=dict)
+    fair: set[str] = field(default_factory=set)
 
     def assignment(self, config: tuple) -> dict[str, str]:
         return dict(zip(self.names, config))
@@ -172,7 +177,7 @@ def evaluate(formula: Formula, assignment: dict[str, str], bound: dict[str, str]
         enum = index.enums.get(formula.enum)
         values = enum.values if enum is not None else []
         return all(evaluate(formula.body, assignment, {**bound, formula.variable: v}, index) for v in values)
-    if isinstance(formula, (Exists, Can)):
+    if isinstance(formula, (Exists, Can, Eventually)):
         raise TypeError(f"{type(formula).__name__} has no value in a single state")
     assert_never(formula)
 
@@ -190,7 +195,7 @@ def free_enums(formula: Formula, index: Index, bound: frozenset[str] = frozenset
         return free_enums(formula.premise, index, bound) | free_enums(formula.conclusion, index, bound)
     elif isinstance(formula, ForAll):
         return free_enums(formula.body, index, bound | {formula.variable})
-    elif isinstance(formula, (Exists, Can)):
+    elif isinstance(formula, (Exists, Can, Eventually)):
         return set()
     else:
         assert_never(formula)
@@ -276,6 +281,7 @@ def check(module: Module) -> list[Finding]:
         check_permissions,
         check_machines,
         check_system,
+        check_fairness,
         check_assertions,
         check_enums,
         check_scenarios,
@@ -375,7 +381,7 @@ def check_formula(
             for value in formula.values:
                 if value not in index.enums[enum].values:
                     findings.append(Finding("UNDEFINED", f"{value} is not a value of {enum}", line))
-    elif isinstance(formula, (Not, Can)):
+    elif isinstance(formula, (Not, Can, Eventually)):
         check_formula(formula.operand, bound, index, line, findings)
     elif isinstance(formula, (And, Or)):
         for operand in formula.operands:
@@ -918,7 +924,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
             actions.append(Action(label, machine.name, transition, transition.conditions, updates, free, facts, after))
             scopes[id(actions[-1])] = scope
     names = [*(machine.name for machine in machines), *counter_order, *mutable, *rigid]
-    system = System(names, rigid, interesting, seen, steps, behind)
+    system = System(names, rigid, interesting, seen, steps, behind, actions)
     describe_path = system.path
 
     def start_problem(start: dict[str, str]) -> Finding | None:
@@ -1060,6 +1066,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
             if not enabling:
                 continue
             behind.setdefault(successor, []).append(config)
+            system.ahead.setdefault(config, []).append((action.label, successor))
             for position, (formula, enums) in enumerate(mixed):
                 if position in broken:
                     continue
@@ -1137,8 +1144,10 @@ def solved_assertions(module: Module, index: Index) -> list[Finding]:
         return findings
     for assertion in module.assertions:
         label = f"assertion {assertion.name}"
-        if outer_cans(assertion.formula):
-            findings.append(Finding("TOO_LARGE", f"{label} uses can, which needs the enumerated state space", assertion.line))
+        modal = outer_cans(assertion.formula)
+        if modal:
+            used = "can" if isinstance(modal[0], Can) else "eventually"
+            findings.append(Finding("TOO_LARGE", f"{label} uses {used}, which needs the enumerated state space", assertion.line))
             continue
         chosen = closure(index, free_enums(assertion.formula, index) - set(system.states))
         facts = [formula for formula, enums in index.invariant_terms if enums and enums <= chosen]
@@ -1155,8 +1164,8 @@ def solved_assertions(module: Module, index: Index) -> list[Finding]:
     return findings
 
 
-def outer_cans(formula: Formula) -> list[Can]:
-    if isinstance(formula, Can):
+def outer_cans(formula: Formula) -> list[Can | Eventually]:
+    if isinstance(formula, (Can, Eventually)):
         return [formula]
     if isinstance(formula, Not):
         return outer_cans(formula.operand)
@@ -1171,6 +1180,77 @@ def outer_cans(formula: Formula) -> list[Can]:
     assert_never(formula)
 
 
+def check_fairness(module: Module, index: Index) -> list[Finding]:
+    findings = []
+    system = index.system
+    for line, machine, event in module.fair:
+        copies = [found for found in module.machines if found.name.split(".")[-1] == machine]
+        if not copies:
+            findings.append(Finding("UNDEFINED", f"machine {machine} of fair is not defined", line))
+        elif event not in copies[0].events:
+            findings.append(Finding("UNDEFINED", f"event {event} of fair is not an event of {machine}", line))
+        if system is None:
+            continue
+        for action in system.actions:
+            if action.machine.split(".")[-1] != machine or action.origin.event != event:
+                continue
+            if action.free:
+                message = f"fair {machine}.{event} reads {', '.join(action.free)}, which changes freely, so nothing makes the event happen"
+                findings.append(Finding("UNDEFINED", message, line))
+                break
+            system.fair.add(action.label)
+    return findings
+
+
+def stalling(system: System, avoid: set[tuple]) -> dict[tuple, str]:
+    reasons: dict[tuple, str] = {}
+    order: dict[tuple, int] = {}
+    low: dict[tuple, int] = {}
+    stack: list[tuple] = []
+    waiting: set[tuple] = set()
+
+    def inside(config: tuple) -> list[tuple[str, tuple]]:
+        return [(label, successor) for label, successor in system.ahead.get(config, ()) if successor in avoid]
+
+    def enter(config: tuple) -> tuple[tuple, Iterator[tuple[str, tuple]]]:
+        order[config] = low[config] = len(order)
+        stack.append(config)
+        waiting.add(config)
+        return config, iter(inside(config))
+
+    # Tarjan's algorithm with its own stack, because a path of configurations can be longer than the recursion limit.
+    for root in system.seen:
+        if root not in avoid or root in order:
+            continue
+        work = [enter(root)]
+        while work:
+            config, successors = work[-1]
+            unvisited = next((successor for _, successor in successors if successor not in order), None)
+            if unvisited is not None:
+                work.append(enter(unvisited))
+                continue
+            work.pop()
+            for _, successor in inside(config):
+                if successor in waiting:
+                    low[config] = min(low[config], low[successor])
+            if low[config] != order[config]:
+                continue
+            component = [stack.pop()]
+            while component[-1] != config:
+                component.append(stack.pop())
+            waiting.difference_update(component)
+            members = set(component)
+            taken = {label for member in component for label, successor in inside(member) if successor in members}
+            enabled = set.intersection(*({label for label, _ in system.ahead.get(member, ())} for member in component))
+            # A run that stays in the component is fair unless a fair event is enabled all along and never taken.
+            if (system.fair & enabled) - taken:
+                continue
+            for member in component:
+                state = describe(system.assignment(member))
+                reasons[member] = f"{', '.join(sorted(taken))} can repeat forever" if taken else f"nothing has to happen in {state}"
+    return reasons
+
+
 def check_assertions(module: Module, index: Index) -> list[Finding]:
     system = index.system
     if not module.assertions:
@@ -1180,6 +1260,7 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
     findings: list[Finding] = []
     scopes: dict[int, list[dict[str, str]] | None] = {}
     can_sets: dict[int, set[tuple]] = {}
+    stalls: dict[int, tuple[set[tuple], dict[tuple, str]]] = {}
 
     def scope_of(formula: Formula) -> list[dict[str, str]] | None:
         if id(formula) not in scopes:
@@ -1190,6 +1271,8 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
     def ground(formula: Formula, config: tuple) -> Formula:
         if isinstance(formula, Can):
             return And([]) if config in can_set(formula) else Or([])
+        if isinstance(formula, Eventually):
+            return Or([]) if config in stall_set(formula)[0] else And([])
         if isinstance(formula, Not):
             return Not(ground(formula.operand, config))
         if isinstance(formula, (And, Or)):
@@ -1223,6 +1306,39 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
             can_sets[id(formula)] = found
         return can_sets[id(formula)]
 
+    def stall_set(formula: Eventually) -> tuple[set[tuple], dict[tuple, str]]:
+        if id(formula) not in stalls:
+            # The values that change freely are chosen against the property, so one world that misses it is enough.
+            avoid = {config for config in system.seen if not all(holds for _, holds in states_of(formula.operand, config))}
+            reasons = stalling(system, avoid)
+            doomed = set(reasons)
+            queue = deque(doomed)
+            while queue:
+                for previous in system.behind.get(queue.popleft(), ()):
+                    if previous in avoid and previous not in doomed:
+                        doomed.add(previous)
+                        queue.append(previous)
+            stalls[id(formula)] = doomed, reasons
+        return stalls[id(formula)]
+
+    def stall(formula: Formula, config: tuple) -> str:
+        for found in outer_cans(formula):
+            if isinstance(found, Can) or config not in stall_set(found)[0]:
+                continue
+            doomed, reasons = stall_set(found)
+            routes: dict[tuple, list[str]] = {config: []}
+            queue = deque([config])
+            while queue:
+                current = queue.popleft()
+                if current in reasons:
+                    after = f" after {' -> '.join(routes[current])}" if routes[current] else ""
+                    return f", because {reasons[current]}{after}"
+                for step, successor in system.ahead.get(current, ()):
+                    if successor in doomed and successor not in routes:
+                        routes[successor] = [*routes[current], step]
+                        queue.append(successor)
+        return ""
+
     def unscoped(formula: Formula) -> bool:
         return scope_of(formula) is None or any(unscoped(inner.operand) for inner in outer_cans(formula))
 
@@ -1239,6 +1355,7 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
             (
                 (config, state)
                 for config in system.seen
+                if assertion.mode == "always" or system.seen[config] is None
                 for state, holds in states_of(assertion.formula, config)
                 if not holds
             ),
@@ -1247,7 +1364,8 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
         if failure is not None:
             config, state = failure
             where = "at the start" if system.seen[config] is None else f"after: {system.path(config)}"
-            findings.append(Finding("ASSERTION_FAILED", f"{label} fails {where} ({describe(state)})", assertion.line))
+            reason = stall(assertion.formula, config)
+            findings.append(Finding("ASSERTION_FAILED", f"{label} fails {where} ({describe(state)}){reason}", assertion.line))
     return findings
 
 

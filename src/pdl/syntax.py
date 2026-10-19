@@ -59,7 +59,7 @@ TEXT_ATTRIBUTES = ("why", "stored", "after", "mixed")
 UNKNOWN_POLICIES = ("structure", "value")
 UNKNOWN_ATTRIBUTES = ("label", "source", "provisional", "verified", "open")
 UNKNOWN_FLAGS = ("verified", "open")
-IMPORTED_KINDS = ("enum", "entity", "term", "actor", "action", "external", "unknown")
+IMPORTED_KINDS = ("enum", "entity", "term", "actor", "action", "external", "permission", "unknown")
 LABELED = (TermDefinition, EnumDefinition, EntityDefinition, Declaration, Machine, Constant, Derivation, Screen)
 
 
@@ -337,6 +337,7 @@ class Parser:
             "actor": self.declaration,
             "action": self.declaration,
             "external": self.declaration,
+            "permission": self.declaration,
             "permit": self.rule,
             "forbid": self.rule,
             "assume": self.premise,
@@ -507,6 +508,7 @@ class Parser:
 
     def declaration(self, module: Module) -> None:
         token = self.advance()
+        first = True
         while True:
             declaration = Declaration(token.line, token.value, self.word())
             while token.value == "action":
@@ -518,8 +520,17 @@ class Parser:
                     break
             module.declarations.append(declaration)
             module.definitions.append((token.value, declaration.name, token.line))
+            if self.at("grants"):
+                if token.value != "actor":
+                    raise PdlSyntaxError(token.line, f"only an actor grants permissions, and {declaration.name} is not one")
+                if not first:
+                    raise PdlSyntaxError(token.line, "grants follows a single actor")
+                self.advance()
+                declaration.grants = self.comma_words()
+                break
             if not self.accept(","):
                 break
+            first = False
 
     def rule(self, module: Module) -> None:
         token = self.advance()
@@ -629,7 +640,8 @@ class Parser:
         shows = [self.path()]
         while self.accept(","):
             shows.append(self.path())
-        module.screens.append(Screen(line, name, entity, shows, assumes=self.assumptions()))
+        actors = self.comma_words() if self.accept("@") else []
+        module.screens.append(Screen(line, name, entity, shows, assumes=self.assumptions(), actors=actors))
         module.definitions.append(("screen", name, line))
 
     def run(self, module: Module) -> None:

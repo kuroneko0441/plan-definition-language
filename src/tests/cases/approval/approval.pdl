@@ -1,0 +1,58 @@
+module approval
+
+permission ApprovePartner, ViewNotice, ViewRate
+actor Dealer grants ViewNotice, ViewRate
+actor Manager grants ApprovePartner, ViewNotice, ViewRate
+
+MemberKind : {Corporate, Individual}
+Notice passive {
+    title: Text
+}
+Rate passive {
+    percent: Decimal
+}
+
+Membership : {General, Applied, Partner} init General final {Partner}
+
+Membership.Apply @Dealer {
+    Membership = General => Membership' = Applied
+    else reject
+}
+Membership.Approve @ApprovePartner {
+    Membership = Applied => Membership' = Partner
+    else reject
+}
+Membership.Return @ApprovePartner {
+    Membership = Applied => Membership' = General
+    else reject
+}
+
+screen NoticeList of Notice shows Notice.title @ViewNotice
+screen RateList of Rate shows Rate.percent @ViewRate
+
+run approved: Membership = General -> Apply, Approve -> Membership = Partner
+
+text {
+    module "파트너회원 승인"
+    ApprovePartner "파트너 승인"
+    ViewNotice "공지 조회"
+    ViewRate "수수료율 조회"
+    Dealer "딜러"
+    Manager "담당자"
+    MemberKind "회원 구분"
+    MemberKind.Corporate "법인"
+    MemberKind.Individual "개인"
+    Notice "공지사항"
+    Notice.title "제목"
+    Rate "수수료율"
+    Rate.percent "비율"
+    Membership "회원 등급"
+    Membership.General "일반회원"
+    Membership.Applied "승인 대기"
+    Membership.Partner "파트너회원"
+    Membership.Apply "파트너 신청"
+    Membership.Approve "승인"
+    Membership.Return "반려"
+    NoticeList "공지사항 목록"
+    RateList "수수료율 목록"
+}

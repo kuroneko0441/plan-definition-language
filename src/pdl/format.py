@@ -175,7 +175,8 @@ class Writer:
         for declaration in module.declarations:
             by = f" by ({', '.join(declaration.performed_by)})" if declaration.performed_by else ""
             on = f" on ({', '.join(declaration.applies_to)})" if declaration.applies_to else ""
-            lines.append(f"{declaration.kind} {declaration.name}{by}{on}")
+            grants = f" grants {', '.join(declaration.grants)}" if declaration.grants else ""
+            lines.append(f"{declaration.kind} {declaration.name}{by}{on}{grants}")
             self.text(declaration.name, declaration.label)
         self.section(lines)
         lines = []
@@ -214,7 +215,8 @@ class Writer:
             lines.append(f"derive {derivation.name} of {derivation.entity} {form}{assuming(derivation.assumes)}")
             self.text(derivation.name, derivation.label, why=derivation.why, mixed=derivation.mixed_label)
         for screen in module.screens:
-            lines.append(f"screen {screen.name} of {screen.entity} shows {', '.join(screen.shows)}{assuming(screen.assumes)}")
+            actors = f" @{', '.join(screen.actors)}" if screen.actors else ""
+            lines.append(f"screen {screen.name} of {screen.entity} shows {', '.join(screen.shows)}{actors}{assuming(screen.assumes)}")
             self.text(screen.name, screen.label, why=screen.why)
         self.section(lines)
         for machine in module.machines:

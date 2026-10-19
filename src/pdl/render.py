@@ -88,6 +88,9 @@ LABELS = {
         "expect": "기대 상태",
         "law": "규칙",
         "any": "조건 없음",
+        "permissions": "권한",
+        "required_by": "필요한 곳",
+        "granted_by": "부여하는 주체",
     },
     "en": {
         "unverified": "Assumptions that need confirmation",
@@ -156,6 +159,9 @@ LABELS = {
         "expect": "Expected state",
         "law": "Rule",
         "any": "Any",
+        "permissions": "Permissions",
+        "required_by": "Required by",
+        "granted_by": "Granted by",
     },
 }
 
@@ -192,6 +198,38 @@ def term_text(term: Term) -> str:
     if isinstance(term, Reference):
         return f"{term.entity}.{term.attribute}"
     return f"{term.function}({term_text(term.argument)})"
+
+
+def owner_text(name: str, module: Module, names: Names, language: str) -> str:
+    if not any(declaration.kind == "permission" and declaration.name == name for declaration in module.declarations):
+        return names.show(name)
+    if language == "ko":
+        shown = names.show(name)
+        return f"{attach(shown if shown.endswith('권한') else shown + ' 권한', '을', '를')} 가진 계정"
+    return f"anyone holding {name}"
+
+
+def render_holders(module: Module, labels: dict[str, str], names: Names, language: str) -> list[str]:
+    permissions = [declaration for declaration in module.declarations if declaration.kind == "permission"]
+    if not permissions:
+        return []
+    lines = [f"## {labels['permissions']}", ""]
+    for permission in permissions:
+        shown = names.show(permission.name)
+        lines.append(f"- {shown} ({permission.name})" if shown != permission.name else f"- {shown}")
+        places = []
+        for machine in module.machines:
+            for event in machine.events:
+                if any(event == t.event and permission.name in t.actors for t in machine.transitions):
+                    event_label = machine.event_labels.get(event) or event
+                    places.append(f"{names.show(machine.name)}의 '{event_label}'" if language == "ko" else f"{machine.name}.{event}")
+        places += [names.show(screen.name) for screen in module.screens if permission.name in screen.actors]
+        grantors = [names.show(d.name) for d in module.declarations if permission.name in d.grants]
+        if places:
+            lines.append(f"  - {labels['required_by']}: {', '.join(places)}")
+        if grantors:
+            lines.append(f"  - {labels['granted_by']}: {', '.join(grantors)}")
+    return lines + [""]
 
 
 def render_views(module: Module, labels: dict[str, str], names: Names, language: str) -> list[str]:
@@ -247,6 +285,8 @@ def render_views(module: Module, labels: dict[str, str], names: Names, language:
                 else:
                     items.append(names.show(item))
             note = assumption_text(screen.assumes, module, labels)
+            if screen.actors:
+                note = f" ({labels['actor']}: {', '.join(owner_text(a, module, names, language) for a in screen.actors)})" + note
             if language == "ko":
                 joined = ", ".join(items[:-1] + [attach(items[-1], "을", "를")])
                 lines.append(f"- {attach(names.show(screen.name), '은', '는')} {joined} 보여 준다.{note}")
@@ -359,7 +399,7 @@ def render_machines(
                 lines.append(f'    state "{state_text(machine, state)}" as {state}')
         lines.append(f"    [*] --> {machine.initial}")
         for transition in machine.transitions:
-            actor = f" ({', '.join(names.show(a) for a in transition.actors)})" if transition.actors else ""
+            actor = f" ({', '.join(owner_text(a, module, names, language) for a in transition.actors)})" if transition.actors else ""
             event = event_text(machine, transition.event)
             lines.append(f"    {transition.source} --> {transition.target}: {event}{actor}")
         lines += [f"    {terminal} --> [*]" for terminal in machine.terminals]
@@ -382,7 +422,7 @@ def render_machines(
             source = state_text(machine, transition.source)
             target = state_text(machine, transition.target)
             event = event_text(machine, transition.event)
-            actor = ", ".join(names.show(a) for a in transition.actors) or "-"
+            actor = ", ".join(owner_text(a, module, names, language) for a in transition.actors) or "-"
             note = assumption_text(transition.assumes, module, labels)
             effects = ", ".join(
                 (
@@ -526,6 +566,7 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
     lines += render_machines(module, labels, names, language)
     lines += render_permissions(module, index, labels, names, language, summary=False)
     lines += render_views(module, labels, names, language)
+    lines += render_holders(module, labels, names, language)
     if module.invariants:
         lines += [f"## {labels['invariants']}", ""]
         for invariant in module.invariants:

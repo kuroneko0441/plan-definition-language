@@ -123,12 +123,13 @@ class Index:
             for counter, maximum in machine.counters.items():
                 values = [str(number) for number in range(maximum + 1)]
                 self.enums.setdefault(counter, EnumDefinition(machine.line, counter, values))
-        kinds = {"actor": set(), "external": set(), "action": set()}
+        kinds = {"actor": set(), "external": set(), "action": set(), "permission": set()}
         for declaration in module.declarations:
             kinds[declaration.kind].add(declaration.name)
         self.internal_actors = kinds["actor"]
         self.actors = kinds["actor"] | kinds["external"]
         self.actions = kinds["action"]
+        self.permissions = kinds["permission"]
         self.guarded_resources = {
             name for name, entity in self.entities.items() if not entity.passive
         }
@@ -617,6 +618,10 @@ def check_views(module: Module, index: Index) -> list[Finding]:
                 findings.append(
                     Finding("UNDEFINED", f"{item} shown by screen {screen.name} is not defined", screen.line, subject=(screen.name, item))
                 )
+        for actor in screen.actors:
+            if actor not in index.actors | index.permissions:
+                message = f"{actor} of screen {screen.name} is neither an actor nor a permission"
+                findings.append(Finding("UNDEFINED", message, screen.line, subject=(screen.name, actor)))
     return findings
 
 
@@ -642,17 +647,32 @@ def check_actions(module: Module, index: Index) -> list[Finding]:
         for kind, names, known in (
             ("actor", declaration.performed_by, index.actors),
             ("entity", declaration.applies_to, set(index.entities)),
+            ("permission", declaration.grants, index.permissions),
         ):
             for name in names:
                 if name not in known:
                     findings.append(
                         Finding(
                             "UNDEFINED",
-                            f"{kind} {name} of action {declaration.name} is not defined",
+                            f"{kind} {name} of {declaration.kind} {declaration.name} is not defined",
                             declaration.line,
                             subject=(declaration.name, name),
                         )
                     )
+    required = {actor for screen in module.screens for actor in screen.actors}
+    required.update(actor for machine in module.machines for item in machine.transitions for actor in item.actors)
+    for declaration in module.declarations:
+        own = module.locate(declaration.line)[0] is None
+        if declaration.kind == "permission" and own and declaration.name not in required:
+            findings.append(
+                Finding(
+                    "UNREFERENCED",
+                    f"permission {declaration.name} is not required by any event, clause, or screen",
+                    declaration.line,
+                    blocking=False,
+                    subject=(declaration.name,),
+                )
+            )
     return findings
 
 
@@ -943,9 +963,14 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
         if not transition.actors:
             findings.append(Finding("OWNERLESS", f"{label} has no actor", transition.line, subject=owner))
         for actor in transition.actors:
-            if actor not in index.actors:
+            if actor not in index.actors | index.permissions:
                 findings.append(
-                    Finding("UNDEFINED", f"actor {actor} in {label} is not defined", transition.line, subject=(*owner, actor))
+                    Finding(
+                        "UNDEFINED",
+                        f"{actor} in {label} is neither an actor nor a permission",
+                        transition.line,
+                        subject=(*owner, actor),
+                    )
                 )
         for condition in transition.conditions:
             findings.extend(check_condition(condition, index, transition.line, owner))

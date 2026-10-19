@@ -63,6 +63,7 @@ class Screen:
     label: str = ""
     why: str = ""
     assumes: list[str] = field(default_factory=list)
+    actors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -73,6 +74,7 @@ class Declaration:
     label: str = ""
     performed_by: list[str] = field(default_factory=list)
     applies_to: list[str] = field(default_factory=list)
+    grants: list[str] = field(default_factory=list)
 
 
 @dataclass

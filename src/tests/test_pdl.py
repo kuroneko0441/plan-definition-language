@@ -1567,6 +1567,76 @@ class SyntaxTest(unittest.TestCase):
         self.assertEqual(to_text(module), to_text(syntax.parse_module(to_text(module))))
 
 
+MEMBERSHIP = """
+module membership
+permission Approve, Read
+actor Dealer
+actor Manager grants Approve, Read
+Notice passive {
+    title: Text
+}
+M : {General, Applied, Partner} init General final {Partner}
+M.Apply @Dealer {
+    M = General => M' = Applied
+    else reject
+}
+M.Grant @Approve {
+    M = Applied => M' = Partner
+    else reject
+}
+screen Notices of Notice shows Notice.title @Read
+text {
+    Approve "파트너 승인"
+}
+"""
+
+
+class PermissionTest(unittest.TestCase):
+    def findings(self, text: str) -> list[tuple[str, str]]:
+        return [(f.kind, f.message) for f in check(parse_module(text))]
+
+    def test_an_event_or_a_screen_names_a_permission_that_actors_grant(self):
+        self.assertEqual(self.findings(MEMBERSHIP), [])
+        ungranted = MEMBERSHIP.replace("actor Manager grants Approve, Read", "actor Manager")
+        self.assertEqual(self.findings(ungranted), [])
+
+    def test_a_name_that_is_not_declared_is_undefined(self):
+        for old, new in (
+            ("grants Approve, Read", "grants Approve, Read, Edit"),
+            ("M.Grant @Approve", "M.Grant @Edit"),
+            ("M = Applied => M' = Partner", "M = Applied => M' = Partner @Edit"),
+            ("@Read", "@Edit"),
+        ):
+            kinds = [kind for kind, _ in self.findings(MEMBERSHIP.replace(old, new))]
+            self.assertIn("UNDEFINED", kinds, new)
+
+    def test_a_permission_that_nothing_requires_is_a_note(self):
+        findings = check(parse_module(MEMBERSHIP.replace(" @Read", "")))
+        self.assertEqual([(f.kind, f.blocking) for f in findings], [("UNREFERENCED", False)])
+
+    def test_only_a_single_actor_grants(self):
+        for statement in ("actor Dealer, Manager grants Approve", "external Hook grants Approve"):
+            with self.assertRaises(PdlSyntaxError, msg=statement):
+                parse_module(MEMBERSHIP.replace("actor Manager grants Approve, Read", statement))
+
+    def test_the_document_names_who_holds_a_permission(self):
+        module = parse_module(MEMBERSHIP)
+        korean = render(module, check(module))
+        self.assertIn("(주체: 파트너 승인 권한을 가진 계정)", korean)
+        self.assertIn("  - 부여하는 주체: Manager", korean)
+        english = render(module, check(module), "en")
+        self.assertIn("(actor: anyone holding Approve)", english)
+        self.assertIn("  - Required by: Notices", english)
+        self.assertEqual(to_text(parse_module(to_text(module))), to_text(module))
+
+    def test_modules_compare_their_permissions(self):
+        modules = [
+            (Path("a.pdl"), parse_module("module a\npermission Approve\n")),
+            (Path("b.pdl"), parse_module("module b\nactor Approve\n")),
+        ]
+        self.assertEqual([f.kind for f in compare(modules)], ["INCONSISTENT"])
+
+
 class ReferenceTest(unittest.TestCase):
     def test_the_reference_command_prints_the_packaged_reference(self):
         import contextlib

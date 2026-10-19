@@ -83,7 +83,7 @@ The parts mean:
 
 - `init` names the initial state, and `final` lists the states where the machine ends. `cyclic` marks a machine that returns to its initial state instead of ending.
 - `<Machine>.<Counter> : 0..<max>` declares a counter of the machine, which starts at 0. The maximum is a number or a constant, and the machine is declared before its counters.
-- `<Machine>.<Event> @<actors> { … }` declares an event and the actors that cause it. One event changes one machine.
+- `<Machine>.<Event> @<actors> { … }` declares an event and the actors or permissions that cause it. One event changes one machine.
 - A clause is `<guard> => <outcome>`. The conjuncts of the guard that compare the machine itself with `=`, `!=`, or `in` name the states that the clause leaves, and a clause without such a conjunct leaves every state.
 - `<Machine>' = <State>` in the outcome names the next state, and a clause without it stays in its state.
 - `<Counter>' = <n>` sets a counter, and `<Counter>' = <Counter> + <n>` raises it.
@@ -120,7 +120,7 @@ The parts mean:
 
 ## Permissions
 
-A permission is a tuple of an actor, an action, and an entity, with a condition:
+A rule is a tuple of an actor, an action, and an entity, with a condition:
 
 ```
 actor Operator, Auditor
@@ -137,10 +137,29 @@ The statements mean:
 - `actor` declares an internal role, and `external` declares a system outside the plan.
 - `action` declares what an actor can do, optionally restricted to actors with `by` and to entities with `on`.
 - `permit` and `forbid` take an actor, an action, and an entity, each of which may be `*`, followed by an optional `:` and a formula.
-- `requires <Name>` names an item that the actor must supply.
+- `requires <Name>` names an item that the actor must supply, which differs from a permission that an event requires.
 - `as <tag>` names a rule, so that the `text` block can attach a rationale to it.
 
 A combination of an internal actor, an action, and an entity that is not passive is a hole in every world of the conditions that no rule covers. The language never reads silence as permission.
+
+A permission names something that an account may do, and an actor is a role that grants permissions:
+
+```
+permission ApprovePartner, ViewNotice
+actor Manager grants ApprovePartner, ViewNotice
+Member.Approve @ApprovePartner {
+    Member = Applied => Member' = Partner
+    else reject
+}
+screen NoticeList of Notice shows Notice.title @ViewNotice
+```
+
+The statements mean:
+
+- `permission` declares permissions. The business manages roles while the system runs, so a permission that no actor grants is not a hole.
+- `grants` after a single `actor` lists the permissions that the role holds.
+- A permission in the `@` list of an event, a clause, or a screen stands for any account that holds it, and the generated document names it that way.
+- `permit` and `forbid` take only actors.
 
 ## Assumptions, invariants, properties, and laws
 
@@ -221,7 +240,7 @@ The statements mean:
 - `derive … from <Enum> mixed <Value>` defines a status of an entity that is computed from the enum values of its linked rows. The status takes the given extra value when the rows differ.
 - `derive … : <Type> from <sources>` declares a value of an entity that is computed and not stored. It names the type and the entities, fields, and other computed values that the value is computed from.
 - A source of a computed value is linked to the entity by a field in either direction.
-- `screen` lists what a screen displays, which are fields, enums, and derived values, so that every shown item is checked against the model.
+- `screen` lists what a screen displays, which are fields, enums, and derived values, so that every shown item is checked against the model. An `@` list after the shown items names the actors or permissions that open the screen.
 
 A computed value states its inputs and never its calculation, because calculation logic is outside the scope of the language.
 
@@ -306,7 +325,7 @@ A finding is one hole or one note that the compiler reports about a module, with
 The non-blocking kinds are notes:
 
 - `UNVERIFIED`: a provisional decision has not been confirmed by the business.
-- `UNREFERENCED`: an unknown value that no statement or clause assumes.
+- `UNREFERENCED`: a declared name that nothing uses, which is an unknown value that no statement or clause assumes, or a permission that no event, clause, or screen requires.
 - `LABEL_DIFFERS`: two modules label one name differently.
 
 ## Modules of one plan

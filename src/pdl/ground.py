@@ -206,27 +206,23 @@ class Expander:
             return Atom(right.text, "=", left.text)
         return truth(left.text == right.text)
 
+    def relate(self, operator: str, left: Leaf, right: Leaf) -> Formula:
+        if operator not in ("=", "!="):
+            return Atom(left.text, operator, right.text)
+        equal = self.equal(left, right)
+        if operator == "=":
+            return equal
+        if isinstance(equal, Atom):
+            return Atom(equal.left, "!=", equal.right)
+        return Not(equal)
+
     def compare(self, formula: Atom, environment: dict[str, Leaf], line: int) -> Formula:
-        ordered = formula.operator not in ("=", "!=")
         cases = [
-            conjunction(
-                [
-                    *left_conditions,
-                    *right_conditions,
-                    Atom(left.text, formula.operator, right.text) if ordered else self.equal(left, right),
-                ]
-            )
+            conjunction([*left_conditions, *right_conditions, self.relate(formula.operator, left, right)])
             for left_conditions, left in self.expand_term(formula.left, environment, line)
             for right_conditions, right in self.expand_term(formula.right, environment, line)
         ]
-        result = cases[0] if len(cases) == 1 else Or(cases)
-        if ordered:
-            return result
-        if formula.operator == "=":
-            return result
-        if isinstance(result, Atom):
-            return Atom(result.left, "!=", result.right)
-        return Not(result)
+        return cases[0] if len(cases) == 1 else Or(cases)
 
     def member(self, formula: InSet, environment: dict[str, Leaf], line: int) -> Formula:
         cases = []

@@ -892,6 +892,11 @@ class RelationTest(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("assertion b", failures[0])
 
+    def test_an_inequality_through_a_missing_reference_is_false(self):
+        failures = self.failures(SHOP + GOLD_ONLY + "prop a: reachable Order1.backup.grade != Gold\n")
+        self.assertEqual(failures, ["assertion a holds in no reachable state"])
+        self.assertEqual(self.failures(SHOP + GOLD_ONLY + "prop a: reachable !(Order1.backup.grade = Gold)\n"), [])
+
     def test_a_rule_reads_the_instance_it_applies_to(self):
         base = SHOP.replace("Order key (id) passive {", "Order key (id) {") + "actor Clerk\naction Edit\n"
         covered = base + "permit Clerk Edit Order: this.Flow = Open\nforbid Clerk Edit Order: this.Flow = Done\n"

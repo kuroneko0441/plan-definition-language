@@ -4,7 +4,7 @@
 
 이 문서는 구멍이 남은 상태의 초안이며, 아래 구멍이 모두 해소되어야 확정된 기획서가 된다.
 
-- INVARIANT_VIOLATED: an invariant over machine states fails after: Booking: Confirm (Booking=Confirmed, Payment=Unpaid)
+- INVARIANT_VIOLATED: invariant confirmed_is_paid over machine states fails after: Booking: Confirm (Booking=Confirmed, Payment=Unpaid)
 
 ## 업무 흐름: 예약
 

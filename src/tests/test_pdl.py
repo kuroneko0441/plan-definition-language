@@ -1,7 +1,10 @@
+import contextlib
 import unittest
 from collections import Counter
 from pathlib import Path
 from unittest import mock
+
+import z3
 
 from pdl.checks import check
 from pdl.cli import check_consistency
@@ -193,6 +196,11 @@ class SeededHoleTest(unittest.TestCase):
     def test_uncovered_combination(self):
         text = "module m\nactor X\naction Do\nR {}"
         self.assertEqual(blocking_kinds(text), Counter({"UNCOVERED": 1}))
+        self.assertEqual([f.line for f in check(parse_module(text))], [3])
+        ruled = "module m\nS : {A, B}\nactor X\naction Do\nR {}\npermit X Do R: S = A"
+        self.assertEqual([f.line for f in check(parse_module(ruled))], [6])
+        with mock.patch("pdl.checks.worlds", side_effect=static_only):
+            self.assertEqual([f.line for f in check(parse_module(ruled))], [6])
 
     def test_wildcard_covers_every_combination(self):
         text = "module m\nactor X, Y\naction Do\nR {}\npermit * Do R"
@@ -717,6 +725,15 @@ class SystemSemanticsTest(unittest.TestCase):
         self.assertEqual([f.kind for f in findings], ["INVARIANT_VIOLATED"])
         self.assertIn("after: M: Go (Flag=On, M=B)", findings[0].message)
 
+    def test_a_violated_invariant_is_reported_at_its_own_line(self):
+        text = CROSS_MACHINES.replace("inv done_needs_ok", "inv always_true: P = Ok | P = Bad\ninv done_needs_ok")
+        findings = [f for f in check(parse_module(text)) if f.kind == "INVARIANT_VIOLATED"]
+        self.assertEqual([f.line for f in findings], [text.splitlines().index("inv done_needs_ok: T = Done => P = Ok") + 1])
+        self.assertIn("invariant done_needs_ok ", findings[0].message)
+        with mock.patch("pdl.checks.SYSTEM_LIMIT", 0):
+            solved = [f for f in check(parse_module(text)) if f.kind == "INVARIANT_VIOLATED"]
+        self.assertEqual([f.line for f in solved], [f.line for f in findings])
+
     def test_a_guard_that_keeps_the_enum_invariant_passes(self):
         self.assertEqual(blocking_kinds(FLAGGED + "inv i: M = B => Flag = On\n"), Counter())
 
@@ -1236,7 +1253,7 @@ class SolverTest(unittest.TestCase):
                 return sorted(
                     (f.kind, f.line)
                     for f in findings
-                    if f.message.startswith("an invariant over machine states fails")
+                    if " over machine states fails after: " in f.message
                     or "is never reached" in f.message
                     or (f.kind == "ASSERTION_FAILED" and f.line in plain)
                 )
@@ -1257,6 +1274,24 @@ class SolverTest(unittest.TestCase):
         self.assertEqual(blocking_kinds(clash), Counter({"CONTRADICTION": 1}))
         covered = base + "permit X Do R: E0 = A\nforbid X Do R: E0 != A\n"
         self.assertEqual(blocking_kinds(covered), Counter())
+
+    def test_an_undecided_query_is_too_large_and_never_a_pass_or_a_contradiction(self):
+        cases = (
+            (GUARDED.replace("M = A & G = Off => M' = C\n", ""), "pdl.checks.worlds"),
+            ("module m\nS : {A, B}\nactor X\naction Do\nR {}\npermit X Do R: S = A\n", "pdl.checks.worlds"),
+            ("module m\nS : {A, B}\ninv i: S = A\n", "pdl.checks.ENUMERATION_LIMIT"),
+            ("module m\nX { d: Day\ne: Day }\nlaw a: X.d < X.e\nlaw b: X.e < X.d\n", None),
+        )
+        for text, enumeration in cases:
+            with contextlib.ExitStack() as stack:
+                if enumeration == "pdl.checks.worlds":
+                    stack.enter_context(mock.patch(enumeration, side_effect=static_only))
+                elif enumeration:
+                    stack.enter_context(mock.patch(enumeration, 0))
+                stack.enter_context(mock.patch("pdl.solver.z3.Solver.check", return_value=z3.unknown))
+                kinds = Counter(f.kind for f in check(parse_module(text)) if f.blocking)
+            self.assertIn("TOO_LARGE", kinds, text)
+            self.assertNotIn("CONTRADICTION", kinds, text)
 
     def test_laws_that_cannot_hold_together_contradict(self):
         base = "module m\nX { d: Day\ne: Day\nf: Day }\n"

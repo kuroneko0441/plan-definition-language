@@ -1,1 +1,1 @@
-31: HOLE INVARIANT_VIOLATED an invariant over machine states fails after: Booking: Confirm (Booking=Confirmed, Payment=Unpaid)
+31: HOLE INVARIANT_VIOLATED invariant confirmed_is_paid over machine states fails after: Booking: Confirm (Booking=Confirmed, Payment=Unpaid)

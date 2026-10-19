@@ -11,9 +11,27 @@ from .kernel import Action, Assign
 from .model import And, Atom, Call, Can, Eventually, Exists, ForAll, Formula, Implies, InSet, Law, Not, Or, Reference, Term
 
 ORDERINGS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
+# Milliseconds per query, so a query that z3 cannot finish ends as undecided instead of running without end.
+TIMEOUT = 30000
 Environment = dict[str, z3.ArithRef]
 Constraint = z3.BoolRef | z3.Probe | bool
 Number = z3.ArithRef | int
+
+
+class Undecided(Exception):
+    """Raised when z3 answers unknown, so no caller reads the answer as a pass."""
+
+
+def timed_solver() -> z3.Solver:
+    created = z3.Solver()
+    created.set("timeout", TIMEOUT)
+    return created
+
+
+def decide(answer: z3.CheckSatResult) -> bool:
+    if answer == z3.unknown:
+        raise Undecided
+    return answer == z3.sat
 
 
 class Encoder:
@@ -98,7 +116,7 @@ def smallest_model(
         for position, value in enumerate(encoder.enums[name]):
             solver.push()
             solver.add(environment[name] == position)
-            if solver.check() == z3.sat:
+            if decide(solver.check()):
                 assignment[name] = value
                 break
             solver.pop()
@@ -108,12 +126,12 @@ def smallest_model(
 def find_world(enums: dict[str, list[str]], formulas: list[Formula], names: list[str]) -> dict[str, str] | None:
     encoder = Encoder(enums)
     environment = {name: z3.Int(name) for name in names}
-    solver = z3.Solver()
+    solver = timed_solver()
     for name, variable in environment.items():
         solver.add(encoder.domain(name, variable))
     for formula in formulas:
         solver.add(encoder.encode(formula, environment))
-    if solver.check() != z3.sat:
+    if not decide(solver.check()):
         return None
     return smallest_model(solver, encoder, names, environment)
 
@@ -172,7 +190,7 @@ class TransitionSystem:
 
     def reachable(self, bad: Block) -> bool | None:
         fixedpoint = z3.Fixedpoint()
-        fixedpoint.set(engine="spacer")
+        fixedpoint.set(engine="spacer", timeout=TIMEOUT)
         reach = z3.Function("reach", *[z3.IntSort()] * len(self.states), z3.BoolSort())
         failure = z3.Function("failure", z3.BoolSort())
         fixedpoint.register_relation(reach, failure)
@@ -191,7 +209,7 @@ class TransitionSystem:
         return None if answer == z3.unknown else answer == z3.sat
 
     def witness(self, bad: Block) -> tuple[list[str], dict[str, str]]:
-        solver = z3.Solver()
+        solver = timed_solver()
         frames = [self.frame("0")]
         choices: list[z3.ArithRef] = []
         solver.add(self.opening(frames[0]))
@@ -199,7 +217,7 @@ class TransitionSystem:
             solver.push()
             constraints, world = self.block(bad, frames[-1])
             solver.add(constraints)
-            if solver.check() == z3.sat:
+            if decide(solver.check()):
                 break
             solver.pop()
             choice = z3.Int(f"choice@{len(choices)}")
@@ -214,7 +232,7 @@ class TransitionSystem:
             for position, step in enumerate(self.steps):
                 solver.push()
                 solver.add(choice == position)
-                if solver.check() == z3.sat:
+                if decide(solver.check()):
                     path.append(step.label)
                     break
                 solver.pop()
@@ -225,7 +243,12 @@ class TransitionSystem:
         answer = self.reachable(bad)
         if answer is None:
             return True
-        return self.witness(bad) if answer else False
+        if not answer:
+            return False
+        try:
+            return self.witness(bad)
+        except Undecided:
+            return True
 
 
 def term_text(term: Term) -> str:
@@ -258,10 +281,10 @@ def conflicting_laws(laws: list[Law]) -> list[Law]:
     ]
 
     def consistent(kept: list[int]) -> bool:
-        solver = z3.Solver()
+        solver = timed_solver()
         solver.add(ordering)
         solver.add([constraints[position] for position in kept])
-        return solver.check() != z3.unsat
+        return decide(solver.check())
 
     kept = list(range(len(laws)))
     if consistent(kept):

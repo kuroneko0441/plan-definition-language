@@ -26,7 +26,7 @@ MAXIMUM_SCOPE = 6
 NONE = "none"
 THIS = "this"
 
-Problem = tuple[str, str, int]
+Problem = tuple[str, str, int, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,9 @@ class Leaf:
 
 
 class ExpansionError(Exception):
-    pass
+    def __init__(self, message: str, *subject: str):
+        super().__init__(message)
+        self.subject = subject
 
 
 def truth(value: bool) -> Formula:
@@ -93,9 +95,9 @@ class Expander:
         for name, count in module.scopes.items():
             line = module.scope_lines[name]
             if name not in self.entities:
-                self.problems.append(("UNDEFINED", f"entity {name} of the scope is not defined", line))
+                self.problems.append(("UNDEFINED", f"entity {name} of the scope is not defined", line, (name,)))
             elif not 1 <= count <= MAXIMUM_SCOPE:
-                self.problems.append(("TOO_LARGE", f"the scope of {name} must be between 1 and {MAXIMUM_SCOPE}", line))
+                self.problems.append(("TOO_LARGE", f"the scope of {name} must be between 1 and {MAXIMUM_SCOPE}", line, (name,)))
             else:
                 self.atoms[name] = [f"{name}{number}" for number in range(1, count + 1)]
         self.atom_types = {atom: name for name, atoms in self.atoms.items() for atom in atoms}
@@ -140,9 +142,9 @@ class Expander:
             elif base in self.atoms:
                 domain = list(self.atoms[base])
             elif base in self.entities:
-                raise ExpansionError(f"{entity}.{name} refers to {base}, which has no scope")
+                raise ExpansionError(f"{entity}.{name} refers to {base}, which has no scope", entity, name)
             else:
-                raise ExpansionError(f"{entity}.{name} has the type {fields[name]}, which a formula cannot read")
+                raise ExpansionError(f"{entity}.{name} has the type {fields[name]}, which a formula cannot read", entity, name)
             if fields[name].endswith("?"):
                 domain.append(NONE)
             self.variables.setdefault(full, EnumDefinition(line, full, domain))
@@ -150,7 +152,7 @@ class Expander:
                 self.rigid.append(full)
             start = self.entities[entity].starts.get(name)
             if start is not None and start not in domain:
-                raise ExpansionError(f"initial value {start} is not a value of {entity}.{name}")
+                raise ExpansionError(f"initial value {start} is not a value of {entity}.{name}", entity, name, start)
             if start is not None:
                 self.mutable[full] = start
             return Leaf("var", full, base, tuple(domain))
@@ -160,7 +162,7 @@ class Expander:
             if name in machine.counters:
                 values = tuple(str(number) for number in range(self.maximum(machine, name) + 1))
                 return Leaf("var", full, "counter", values)
-        raise ExpansionError(f"{entity} has no field, machine, or counter named {name}")
+        raise ExpansionError(f"{entity} has no field, machine, or counter named {name}", entity, name)
 
     def expand_term(self, text: str, environment: dict[str, Leaf], line: int) -> list[tuple[list[Formula], Leaf]]:
         head, *rest = text.split(".")
@@ -171,13 +173,13 @@ class Expander:
         elif not rest:
             return [([], Leaf("name", head))]
         else:
-            raise ExpansionError(f"{head} in {text} is not a bound variable or an entity instance")
+            raise ExpansionError(f"{head} in {text} is not a bound variable or an entity instance", text, head)
         results: list[tuple[list[Formula], Leaf]] = [([], leaf)]
         for name in rest:
             following = []
             for conditions, leaf in results:
                 if leaf.type not in self.atoms:
-                    raise ExpansionError(f"{name} in {text} is read from a value that is not an entity instance")
+                    raise ExpansionError(f"{name} in {text} is read from a value that is not an entity instance", text, name)
                 if leaf.kind == "const":
                     following.append((conditions, self.variable(leaf.text, name, line)))
                     continue
@@ -195,12 +197,12 @@ class Expander:
             left, right = right, left
         if left.kind == "var" and right.kind == "var":
             if left.type != right.type:
-                raise ExpansionError(f"{left.text} and {right.text} hold values of different types")
+                raise ExpansionError(f"{left.text} and {right.text} hold values of different types", left.text, right.text)
             shared = [value for value in left.domain if value in right.domain and value != NONE]
             return Or([And([Atom(left.text, "=", value), Atom(right.text, "=", value)]) for value in shared])
         if left.kind == "var":
             if right.text not in left.domain:
-                raise ExpansionError(f"{right.text} is not a value of {left.text}")
+                raise ExpansionError(f"{right.text} is not a value of {left.text}", left.text, right.text)
             return Atom(left.text, "=", right.text)
         if right.kind == "name" and right.text in self.globals:
             return Atom(right.text, "=", left.text)
@@ -230,7 +232,7 @@ class Expander:
             if leaf.kind == "var":
                 for value in formula.values:
                     if value not in leaf.domain:
-                        raise ExpansionError(f"{value} is not a value of {leaf.text}")
+                        raise ExpansionError(f"{value} is not a value of {leaf.text}", leaf.text, value)
                 core: Formula = InSet(leaf.text, formula.values)
             elif leaf.kind == "const":
                 core = truth(leaf.text in formula.values)
@@ -259,46 +261,51 @@ class Expander:
         elif formula.enum in self.enums:
             values = self.enums[formula.enum].values
         elif formula.enum in self.entities:
-            raise ExpansionError(f"entity {formula.enum} of the quantifier has no scope")
+            raise ExpansionError(f"entity {formula.enum} of the quantifier has no scope", formula.enum)
         else:
-            raise ExpansionError(f"{formula.enum} of the quantifier is not an enum or an entity")
+            raise ExpansionError(f"{formula.enum} of the quantifier is not an enum or an entity", formula.enum)
         bodies = [
             self.expand(formula.body, {**environment, formula.variable: Leaf("const", value, formula.enum)}, line)
             for value in values
         ]
         return And(bodies) if isinstance(formula, ForAll) else Or(bodies)
 
-    def formula(self, formula: Formula, environment: dict[str, Leaf], line: int) -> Formula:
+    def formula(self, formula: Formula, environment: dict[str, Leaf], line: int, owner: tuple[str, ...]) -> Formula:
         if not environment and not self.relational(formula):
             return formula
         try:
             return self.expand(formula, environment, line)
         except ExpansionError as error:
-            self.problems.append(("UNDEFINED", str(error), line))
+            self.problems.append(("UNDEFINED", str(error), line, (*owner, *error.subject)))
             return truth(True)
 
-    def formulas(self, formulas: list[Formula], environment: dict[str, Leaf], line: int) -> list[Formula]:
-        return [self.formula(formula, environment, line) for formula in formulas]
+    def formulas(
+        self, formulas: list[Formula], environment: dict[str, Leaf], line: int, owner: tuple[str, ...]
+    ) -> list[Formula]:
+        return [self.formula(formula, environment, line, owner) for formula in formulas]
 
-    def updates(self, transition: Transition, environment: dict[str, Leaf]) -> list[tuple[str, str]]:
+    def updates(
+        self, transition: Transition, environment: dict[str, Leaf], owner: tuple[str, ...]
+    ) -> list[tuple[str, str]]:
         resolved = []
         for path, value in transition.updates:
             try:
                 cases = self.expand_term(path, environment, transition.line)
                 conditions, leaf = cases[0]
                 if len(cases) > 1 or conditions or leaf.kind != "var":
-                    raise ExpansionError(f"{path} is not a field of this or of an entity instance")
+                    raise ExpansionError(f"{path} is not a field of this or of an entity instance", path)
                 if leaf.text not in self.mutable:
-                    raise ExpansionError(f"{path} is not a var field, so a clause cannot set it")
+                    raise ExpansionError(f"{path} is not a var field, so a clause cannot set it", path)
                 if value not in leaf.domain:
-                    raise ExpansionError(f"{value} is not a value of {path}")
+                    raise ExpansionError(f"{value} is not a value of {path}", path, value)
                 resolved.append((leaf.text, value))
             except ExpansionError as error:
-                self.problems.append(("UNDEFINED", str(error), transition.line))
+                self.problems.append(("UNDEFINED", str(error), transition.line, (*owner, *error.subject)))
         return resolved
 
     def machine(self, machine: Machine, atom: str, replica: bool) -> Machine:
         prefix = f"{atom}." if atom else ""
+        name = prefix + machine.name
         environment: dict[str, Leaf] = {}
         if atom:
             environment[THIS] = Leaf("const", atom, machine.entity)
@@ -309,18 +316,27 @@ class Expander:
             if constant in self.constants:
                 self.bounds.append(Premise(machine.line, "", Atom(prefix + counter, "<=", constant)))
             elif not replica:
-                self.problems.append(("UNDEFINED", f"maximum {constant} of counter {counter} is not a constant", machine.line))
+                self.problems.append(
+                    ("UNDEFINED", f"maximum {constant} of counter {counter} is not a constant", machine.line, (name, counter, constant))
+                )
         return replace(
             machine,
-            name=prefix + machine.name,
+            name=name,
             replica=replica,
             counters={prefix + counter: self.maximum(machine, counter) for counter in machine.counters},
             counter_bounds={prefix + counter: constant for counter, constant in machine.counter_bounds.items()},
             transitions=[
                 replace(
                     transition,
-                    conditions=self.formulas(transition.conditions, environment, transition.line),
-                    updates=self.updates(transition, environment),
+                    conditions=self.formulas(
+                        transition.conditions,
+                        environment,
+                        transition.line,
+                        (name, transition.source, transition.event, transition.target),
+                    ),
+                    updates=self.updates(
+                        transition, environment, (name, transition.source, transition.event, transition.target)
+                    ),
                     effects=[
                         (prefix + counter if counter in machine.counters else counter, operator, amount)
                         for counter, operator, amount in transition.effects
@@ -329,7 +345,12 @@ class Expander:
                 for transition in machine.transitions
             ],
             handlings=[
-                replace(handling, conditions=self.formulas(handling.conditions, environment, handling.line))
+                replace(
+                    handling,
+                    conditions=self.formulas(
+                        handling.conditions, environment, handling.line, (name, handling.state, handling.event)
+                    ),
+                )
                 for handling in machine.handlings
             ],
         )
@@ -344,7 +365,14 @@ class Expander:
                 machines += [self.machine(machine, atom, atom != atoms[0]) for atom in atoms]
             else:
                 reason = "has no scope" if machine.entity in self.entities else "is not defined"
-                self.problems.append(("UNDEFINED", f"entity {machine.entity} of machine {machine.name} {reason}", machine.line))
+                self.problems.append(
+                    (
+                        "UNDEFINED",
+                        f"entity {machine.entity} of machine {machine.name} {reason}",
+                        machine.line,
+                        (machine.name, machine.entity),
+                    )
+                )
                 machines.append(self.machine(replace(machine, entity=""), "", False))
         return machines
 
@@ -361,14 +389,14 @@ def expand(module: Module) -> tuple[Module, list[Problem]]:
     for scenario in module.scenarios:
         template = templates.get(scenario.machine)
         if template is None:
-            scenarios.append(replace(scenario, given=expander.formulas(scenario.given, {}, scenario.line)))
+            scenarios.append(replace(scenario, given=expander.formulas(scenario.given, {}, scenario.line, (scenario.name,))))
             continue
         environment = expander.first(template.entity)
         scenarios.append(
             replace(
                 scenario,
                 machine=f"{environment[THIS].text}.{scenario.machine}",
-                given=expander.formulas(scenario.given, environment, scenario.line),
+                given=expander.formulas(scenario.given, environment, scenario.line, (scenario.name,)),
             )
         )
     expanded = replace(
@@ -376,13 +404,24 @@ def expand(module: Module) -> tuple[Module, list[Problem]]:
         machines=expander.module_machines(),
         scenarios=scenarios,
         rules=[
-            replace(rule, conditions=expander.formulas(rule.conditions, expander.first(rule.resource), rule.line))
+            replace(
+                rule,
+                conditions=expander.formulas(
+                    rule.conditions, expander.first(rule.resource), rule.line, (rule.actor, rule.action, rule.resource)
+                ),
+            )
             for rule in module.rules
         ],
-        invariants=[replace(item, formula=expander.formula(item.formula, {}, item.line)) for item in module.invariants],
-        premises=[replace(item, formula=expander.formula(item.formula, {}, item.line)) for item in module.premises]
+        invariants=[
+            replace(item, formula=expander.formula(item.formula, {}, item.line, (item.name,))) for item in module.invariants
+        ],
+        premises=[
+            replace(item, formula=expander.formula(item.formula, {}, item.line, (item.name,))) for item in module.premises
+        ]
         + expander.bounds,
-        assertions=[replace(item, formula=expander.formula(item.formula, {}, item.line)) for item in module.assertions],
+        assertions=[
+            replace(item, formula=expander.formula(item.formula, {}, item.line, (item.name,))) for item in module.assertions
+        ],
     )
     expanded.variables = list(expander.variables.values())
     expanded.rigid = expander.rigid

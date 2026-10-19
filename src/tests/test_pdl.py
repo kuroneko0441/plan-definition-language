@@ -1593,6 +1593,63 @@ class ConsistencyTest(unittest.TestCase):
             self.assertIn("INCONSISTENT", output.getvalue())
             self.assertIn("2 modules compared, 1 inconsistencies", output.getvalue())
 
+    def test_a_conflict_carries_a_key_built_from_its_name(self):
+        modules = [
+            (Path("a.pdl"), parse_module("module a\nS : {On, Off}\n")),
+            (Path("b.pdl"), parse_module("module b\nS : {On}\n")),
+            (Path("c.pdl"), parse_module("module c\nS : {Off}\n")),
+        ]
+        findings = compare(modules)
+        self.assertEqual([finding.subject for finding in findings], [("S",), ("S",)])
+        self.assertEqual([finding.key for finding in findings], ["INCONSISTENT:S", "INCONSISTENT:S#2"])
+
+
+def pairs(assignment: dict[str, str]) -> str:
+    return ", ".join(f"{name}={value}" for name, value in sorted(assignment.items()))
+
+
+class FindingIdentityTest(unittest.TestCase):
+    def test_keys_are_unique_within_a_module(self):
+        repeated = UNCOVERED_LIBRARY + "permit Librarian Lend LoanRecord: LoanState = Lost\n" * 2
+        for number, text in enumerate((LIBRARY, UNCOVERED_LIBRARY, repeated, GUARDED, CROSS_MACHINES, SHOP, SHOP + GOLD_ONLY, LOGIN)):
+            with self.subTest(case=number):
+                keys = [finding.key for finding in check(parse_module(text))]
+                self.assertTrue(all(keys))
+                self.assertEqual(len(keys), len(set(keys)))
+        keys = [finding.key for finding in check(parse_module(repeated))]
+        self.assertIn("UNDEFINED:Librarian/Lend/LoanRecord/LoanState/Lost", keys)
+        self.assertIn("UNDEFINED:Librarian/Lend/LoanRecord/LoanState/Lost#2", keys)
+
+    def test_blank_lines_move_a_finding_but_keep_its_key(self):
+        for number, text in enumerate((UNCOVERED_LIBRARY, CROSS_MACHINES, SHOP)):
+            with self.subTest(case=number):
+                before = check(parse_module(text))
+                after = check(parse_module("\n\n\n" + text))
+                self.assertTrue(before)
+                self.assertEqual([(f.key, f.subject) for f in after], [(f.key, f.subject) for f in before])
+                self.assertEqual([f.line for f in after], [f.line + 3 for f in before])
+
+    def test_an_uncovered_guard_carries_the_first_combination_it_prints(self):
+        text = "module m\nC : {X, Y, Z}\n" + GUARDED.replace("module m\n", "").replace("G = On", "G = On & C = X").replace(
+            "M = A & G = Off => M' = C\n", ""
+        )
+        [finding] = [f for f in check(parse_module(text)) if f.kind == "UNCOVERED"]
+        self.assertEqual(finding.subject, ("M", "A", "Go"))
+        self.assertEqual(finding.key, "UNCOVERED:M/A/Go")
+        assert finding.witness is not None
+        self.assertEqual(finding.witness.assignment, {"C": "X", "G": "Off"})
+        self.assertEqual(finding.witness.path, [])
+        self.assertTrue(finding.message.startswith(f"A on Go has no outcome when {pairs(finding.witness.assignment)}; "))
+
+    def test_a_violated_invariant_carries_its_path_and_values(self):
+        [finding] = [f for f in check(parse_module(CROSS_MACHINES)) if f.kind == "INVARIANT_VIOLATED"]
+        self.assertEqual(finding.subject, ("done_needs_ok",))
+        assert finding.witness is not None
+        self.assertEqual(finding.witness.path, ["P: Fail", "T: Finish"])
+        self.assertEqual(finding.witness.assignment, {"P": "Bad", "T": "Done"})
+        printed = f"fails after: {' -> '.join(finding.witness.path)} ({pairs(finding.witness.assignment)})"
+        self.assertTrue(finding.message.endswith(printed))
+
 
 class RenderTest(unittest.TestCase):
     def render_library(self, language: str = "ko") -> str:

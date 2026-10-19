@@ -22,6 +22,8 @@ class ProjectFinding:
     path: Path
     line: int
     blocking: bool = True
+    subject: tuple[str, ...] = ()
+    key: str = ""
 
 
 def collect(path: Path, module: Module) -> dict[str, Entry]:
@@ -105,6 +107,7 @@ def compare(modules: list[tuple[Path, Module]]) -> list[ProjectFinding]:
                         f"{name} is a {entry.category} here and a {first.category} at {where}",
                         path,
                         entry.line,
+                        subject=(name,),
                     )
                 )
             elif difference(first.category, first.signature, entry.signature):
@@ -114,6 +117,7 @@ def compare(modules: list[tuple[Path, Module]]) -> list[ProjectFinding]:
                         f"{first.category} {name} differs from {where}: {difference(first.category, first.signature, entry.signature)}",
                         path,
                         entry.line,
+                        subject=(name,),
                     )
                 )
             elif first.label and entry.label and first.label != entry.label:
@@ -124,6 +128,12 @@ def compare(modules: list[tuple[Path, Module]]) -> list[ProjectFinding]:
                         path,
                         entry.line,
                         blocking=False,
+                        subject=(name,),
                     )
                 )
+    occurrences: dict[str, int] = {}
+    for finding in findings:
+        key = f"{finding.kind}:{'/'.join(finding.subject)}"
+        occurrences[key] = occurrences.get(key, 0) + 1
+        finding.key = key if occurrences[key] == 1 else f"{key}#{occurrences[key]}"
     return findings

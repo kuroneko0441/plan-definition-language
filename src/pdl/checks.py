@@ -49,12 +49,21 @@ def base_type(type_name: str) -> str:
 
 
 @dataclass
+class Witness:
+    assignment: dict[str, str]
+    path: list[str]
+
+
+@dataclass
 class Finding:
     kind: str
     message: str
     line: int
     blocking: bool = True
     path: Path | None = None
+    subject: tuple[str, ...] = ()
+    witness: Witness | None = None
+    key: str = ""
 
 
 @dataclass
@@ -78,14 +87,22 @@ class System:
     def assignment(self, config: tuple) -> dict[str, str]:
         return dict(zip(self.names, config))
 
-    def path(self, config: tuple) -> str:
+    def labels(self, config: tuple) -> list[str]:
         path = []
-        fixed = config[len(config) - len(self.rigid) :]
         while (previous := self.seen[config]) is not None:
             path.append(self.steps[config])
             config = previous
-        route = " -> ".join(reversed(path)) or "the start"
-        return f"{route} with {describe(dict(zip(self.rigid, fixed)))}" if self.rigid else route
+        return list(reversed(path))
+
+    def fixed(self, config: tuple) -> dict[str, str]:
+        return dict(zip(self.rigid, config[len(config) - len(self.rigid) :]))
+
+    def path(self, config: tuple) -> str:
+        route = " -> ".join(self.labels(config)) or "the start"
+        return f"{route} with {describe(self.fixed(config))}" if self.rigid else route
+
+    def witness(self, config: tuple) -> Witness:
+        return Witness(self.fixed(config), self.labels(config))
 
 
 class Index:
@@ -272,7 +289,7 @@ def triple_outcomes(
 def check(module: Module) -> list[Finding]:
     module, problems = expand(module)
     index = Index(module)
-    findings = [Finding(kind, message, line) for kind, message, line in problems]
+    findings = [Finding(kind, message, line, subject=subject) for kind, message, line, subject in problems]
     for step in (
         check_definitions,
         check_entities,
@@ -294,6 +311,11 @@ def check(module: Module) -> list[Finding]:
         findings.extend(step(module, index))
     for finding in findings:
         finding.path, finding.line = module.locate(finding.line)
+    occurrences: dict[str, int] = {}
+    for finding in findings:
+        key = f"{finding.kind}:{'/'.join(finding.subject)}"
+        occurrences[key] = occurrences.get(key, 0) + 1
+        finding.key = key if occurrences[key] == 1 else f"{key}#{occurrences[key]}"
     return findings
 
 
@@ -307,7 +329,9 @@ def check_definitions(module: Module, index: Index) -> list[Finding]:
 
     for _, name, line in module.definitions:
         if name in first:
-            findings.append(Finding("DUPLICATE", f"{name} is defined twice ({place(first[name])} and {place(line)})", line))
+            findings.append(
+                Finding("DUPLICATE", f"{name} is defined twice ({place(first[name])} and {place(line)})", line, subject=(name,))
+            )
         else:
             first[name] = line
     return findings
@@ -325,6 +349,7 @@ def check_entities(module: Module, index: Index) -> list[Finding]:
                         "UNDEFINED",
                         f"key field {key_field} of entity {entity.name} is not one of its fields",
                         entity.line,
+                        subject=(entity.name, key_field),
                     )
                 )
         for field_name, type_name in entity.fields:
@@ -334,6 +359,7 @@ def check_entities(module: Module, index: Index) -> list[Finding]:
                         "UNDEFINED",
                         f"type {type_name} of {entity.name}.{field_name} is not defined",
                         entity.line,
+                        subject=(entity.name, field_name),
                     )
                 )
     return findings
@@ -355,7 +381,12 @@ def term_enum(term: str, bound: dict[str, str], index: Index) -> str | None:
 
 
 def check_formula(
-    formula: Formula, bound: dict[str, str], index: Index, line: int, findings: list[Finding]
+    formula: Formula,
+    bound: dict[str, str],
+    index: Index,
+    line: int,
+    findings: list[Finding],
+    owner: tuple[str, ...],
 ) -> None:
     if isinstance(formula, Atom):
         left = term_enum(formula.left, bound, index)
@@ -364,43 +395,59 @@ def check_formula(
             term.isdigit() if enum is None else all(value.isdigit() for value in index.enums[enum].values)
             for term, enum in ((formula.left, left), (formula.right, right))
         ]
+        pair = (*owner, formula.left, formula.right)
         if formula.operator in ORDERINGS and not all(numbers):
             findings.append(
-                Finding("UNIT_MISMATCH", f"{formula.left} {formula.operator} {formula.right} compares values that are not numbers", line)
+                Finding(
+                    "UNIT_MISMATCH",
+                    f"{formula.left} {formula.operator} {formula.right} compares values that are not numbers",
+                    line,
+                    subject=pair,
+                )
             )
         elif all(numbers) and (left is not None or right is not None):
             return
         elif left is None and right is None:
             findings.append(
-                Finding("UNDEFINED", f"neither {formula.left} nor {formula.right} is an enum or a bound variable", line)
+                Finding(
+                    "UNDEFINED", f"neither {formula.left} nor {formula.right} is an enum or a bound variable", line, subject=pair
+                )
             )
         elif left is not None and right is not None and left != right:
-            findings.append(Finding("UNIT_MISMATCH", f"{formula.left} and {formula.right} are values of different enums", line))
+            findings.append(
+                Finding("UNIT_MISMATCH", f"{formula.left} and {formula.right} are values of different enums", line, subject=pair)
+            )
         elif left is None and formula.left not in index.enums[right].values:
-            findings.append(Finding("UNDEFINED", f"{formula.left} is not a value of {right}", line))
+            findings.append(Finding("UNDEFINED", f"{formula.left} is not a value of {right}", line, subject=pair))
         elif right is None and formula.right not in index.enums[left].values:
-            findings.append(Finding("UNDEFINED", f"{formula.right} is not a value of {left}", line))
+            findings.append(Finding("UNDEFINED", f"{formula.right} is not a value of {left}", line, subject=pair))
     elif isinstance(formula, InSet):
         enum = term_enum(formula.left, bound, index)
         if enum is None:
-            findings.append(Finding("UNDEFINED", f"{formula.left} is not an enum or a bound variable", line))
+            findings.append(
+                Finding("UNDEFINED", f"{formula.left} is not an enum or a bound variable", line, subject=(*owner, formula.left))
+            )
         else:
             for value in formula.values:
                 if value not in index.enums[enum].values:
-                    findings.append(Finding("UNDEFINED", f"{value} is not a value of {enum}", line))
+                    findings.append(
+                        Finding("UNDEFINED", f"{value} is not a value of {enum}", line, subject=(*owner, formula.left, value))
+                    )
     elif isinstance(formula, (Not, Can, Eventually)):
-        check_formula(formula.operand, bound, index, line, findings)
+        check_formula(formula.operand, bound, index, line, findings, owner)
     elif isinstance(formula, (And, Or)):
         for operand in formula.operands:
-            check_formula(operand, bound, index, line, findings)
+            check_formula(operand, bound, index, line, findings, owner)
     elif isinstance(formula, Implies):
-        check_formula(formula.premise, bound, index, line, findings)
-        check_formula(formula.conclusion, bound, index, line, findings)
+        check_formula(formula.premise, bound, index, line, findings, owner)
+        check_formula(formula.conclusion, bound, index, line, findings, owner)
     elif isinstance(formula, (ForAll, Exists)):
         if formula.enum not in index.enums:
-            findings.append(Finding("UNDEFINED", f"enum {formula.enum} of the quantifier is not defined", line))
+            findings.append(
+                Finding("UNDEFINED", f"enum {formula.enum} of the quantifier is not defined", line, subject=(*owner, formula.enum))
+            )
             return
-        check_formula(formula.body, {**bound, formula.variable: formula.enum}, index, line, findings)
+        check_formula(formula.body, {**bound, formula.variable: formula.enum}, index, line, findings, owner)
     else:
         assert_never(formula)
 
@@ -408,7 +455,7 @@ def check_formula(
 def check_invariants(module: Module, index: Index) -> list[Finding]:
     findings: list[Finding] = []
     for item in (*module.invariants, *module.premises, *module.assertions):
-        check_formula(item.formula, {}, index, item.line, findings)
+        check_formula(item.formula, {}, index, item.line, findings, (item.name,))
     if findings:
         return findings
     enums = sorted(set().union(*(names for _, names in index.invariant_terms)))
@@ -423,13 +470,20 @@ def check_invariants(module: Module, index: Index) -> list[Finding]:
             if solve(index, set(enums), And([])) is not None:
                 return findings
         except Undecided:
-            return [Finding("TOO_LARGE", "the solver could not decide whether the invariants and assumptions admit a combination of values", index.fact_line)]
+            return [
+                Finding(
+                    "TOO_LARGE",
+                    "the solver could not decide whether the invariants and assumptions admit a combination of values",
+                    index.fact_line,
+                    subject=(),
+                )
+            ]
     for values in product(*domains) if size <= ENUMERATION_LIMIT else ():
         assignment = dict(zip(enums, values))
         if all(evaluate(formula, assignment, {}, index) for formula, _ in index.invariant_terms):
             return findings
     return [
-        Finding("CONTRADICTION", "the invariants and assumptions admit no combination of values", index.fact_line)
+        Finding("CONTRADICTION", "the invariants and assumptions admit no combination of values", index.fact_line, subject=())
     ]
 
 
@@ -445,7 +499,9 @@ def check_computed(derivation: Derivation, computed: dict[str, Derivation], inde
     findings = []
     name = derivation.name
     if derivation.type not in BUILTIN_TYPES and derivation.type not in index.enums:
-        findings.append(Finding("UNDEFINED", f"type {derivation.type} of {name} is not defined", derivation.line))
+        findings.append(
+            Finding("UNDEFINED", f"type {derivation.type} of {name} is not defined", derivation.line, subject=(name, derivation.type))
+        )
     reached = set()
     pending = list(derivation.sources)
     while pending:
@@ -454,20 +510,32 @@ def check_computed(derivation: Derivation, computed: dict[str, Derivation], inde
             reached.add(source)
             pending += computed[source].sources
     if name in reached:
-        findings.append(Finding("UNDEFINED", f"{name} is computed from itself", derivation.line))
+        findings.append(Finding("UNDEFINED", f"{name} is computed from itself", derivation.line, subject=(name,)))
     for source in derivation.sources:
         owner, _, attribute = source.partition(".")
         if source in computed:
             owner = computed[source].entity
         elif owner not in index.entities:
-            findings.append(Finding("UNDEFINED", f"source {source} of {name} is not an entity, a field, or a computed value", derivation.line))
+            findings.append(
+                Finding(
+                    "UNDEFINED",
+                    f"source {source} of {name} is not an entity, a field, or a computed value",
+                    derivation.line,
+                    subject=(name, source),
+                )
+            )
             continue
         elif attribute and attribute not in dict(index.entities[owner].fields):
-            findings.append(Finding("UNDEFINED", f"source {source} of {name} is not a field", derivation.line))
+            findings.append(Finding("UNDEFINED", f"source {source} of {name} is not a field", derivation.line, subject=(name, source)))
             continue
         if derivation.entity in index.entities and not linked(index, derivation.entity, owner):
             findings.append(
-                Finding("UNDEFINED", f"source {source} of {name} is not linked to {derivation.entity} by a field", derivation.line)
+                Finding(
+                    "UNDEFINED",
+                    f"source {source} of {name} is not linked to {derivation.entity} by a field",
+                    derivation.line,
+                    subject=(name, source),
+                )
             )
     return findings
 
@@ -479,16 +547,35 @@ def check_views(module: Module, index: Index) -> list[Finding]:
     for derivation in module.derivations:
         enum = index.enums.get(derivation.source)
         if derivation.entity not in index.entities:
-            findings.append(Finding("UNDEFINED", f"entity {derivation.entity} of {derivation.name} is not defined", derivation.line))
+            findings.append(
+                Finding(
+                    "UNDEFINED",
+                    f"entity {derivation.entity} of {derivation.name} is not defined",
+                    derivation.line,
+                    subject=(derivation.name, derivation.entity),
+                )
+            )
         if derivation.type:
             findings.extend(check_computed(derivation, computed, index))
             continue
         if enum is None:
-            findings.append(Finding("UNDEFINED", f"enum {derivation.source} of {derivation.name} is not defined", derivation.line))
+            findings.append(
+                Finding(
+                    "UNDEFINED",
+                    f"enum {derivation.source} of {derivation.name} is not defined",
+                    derivation.line,
+                    subject=(derivation.name, derivation.source),
+                )
+            )
             continue
         if derivation.mixed in enum.values:
             findings.append(
-                Finding("DUPLICATE", f"mixed value {derivation.mixed} is already a value of {derivation.source}", derivation.line)
+                Finding(
+                    "DUPLICATE",
+                    f"mixed value {derivation.mixed} is already a value of {derivation.source}",
+                    derivation.line,
+                    subject=(derivation.name, derivation.mixed),
+                )
             )
         if derivation.entity in index.entities and not row_entities(module, derivation.entity, derivation.source):
             findings.append(
@@ -496,31 +583,45 @@ def check_views(module: Module, index: Index) -> list[Finding]:
                     "UNDEFINED",
                     f"no entity links {derivation.entity} to {derivation.source}, so {derivation.name} has no rows to derive from",
                     derivation.line,
+                    subject=(derivation.name,),
                 )
             )
     for screen in module.screens:
         if screen.entity not in index.entities:
-            findings.append(Finding("UNDEFINED", f"entity {screen.entity} of screen {screen.name} is not defined", screen.line))
+            findings.append(
+                Finding(
+                    "UNDEFINED",
+                    f"entity {screen.entity} of screen {screen.name} is not defined",
+                    screen.line,
+                    subject=(screen.name, screen.entity),
+                )
+            )
         for item in screen.shows:
             if "." in item:
                 entity_name, attribute = item.split(".", 1)
                 entity = index.entities.get(entity_name)
                 if entity is None or attribute not in dict(entity.fields):
-                    findings.append(Finding("UNDEFINED", f"{item} shown by screen {screen.name} is not a field", screen.line))
+                    findings.append(
+                        Finding("UNDEFINED", f"{item} shown by screen {screen.name} is not a field", screen.line, subject=(screen.name, item))
+                    )
             elif item not in index.enums and item not in derived:
-                findings.append(Finding("UNDEFINED", f"{item} shown by screen {screen.name} is not defined", screen.line))
+                findings.append(
+                    Finding("UNDEFINED", f"{item} shown by screen {screen.name} is not defined", screen.line, subject=(screen.name, item))
+                )
     return findings
 
 
-def check_condition(condition: Formula, index: Index, line: int) -> list[Finding]:
+def check_condition(condition: Formula, index: Index, line: int, owner: tuple[str, ...]) -> list[Finding]:
     findings: list[Finding] = []
-    check_formula(condition, {}, index, line, findings)
+    check_formula(condition, {}, index, line, findings, owner)
     return findings
 
 
-def check_assumptions(assumes: list[str], index: Index, line: int, owner: str) -> list[Finding]:
+def check_assumptions(
+    assumes: list[str], index: Index, line: int, owner: str, subject: tuple[str, ...]
+) -> list[Finding]:
     return [
-        Finding("UNDEFINED", f"assumption {name} of {owner} is not declared as unknown", line)
+        Finding("UNDEFINED", f"assumption {name} of {owner} is not declared as unknown", line, subject=(*subject, name))
         for name in assumes
         if name not in index.unknown_ids
     ]
@@ -536,7 +637,12 @@ def check_actions(module: Module, index: Index) -> list[Finding]:
             for name in names:
                 if name not in known:
                     findings.append(
-                        Finding("UNDEFINED", f"{kind} {name} of action {declaration.name} is not defined", declaration.line)
+                        Finding(
+                            "UNDEFINED",
+                            f"{kind} {name} of action {declaration.name} is not defined",
+                            declaration.line,
+                            subject=(declaration.name, name),
+                        )
                     )
     return findings
 
@@ -544,13 +650,16 @@ def check_actions(module: Module, index: Index) -> list[Finding]:
 def check_rules(module: Module, index: Index) -> list[Finding]:
     findings = []
     for rule in module.rules:
+        triple = (rule.actor, rule.action, rule.resource)
         for kind, value, allowed in (
             ("actor", rule.actor, index.action_actors.get(rule.action)),
             ("resource", rule.resource, index.action_resources.get(rule.action)),
         ):
             if allowed is not None and value != "*" and value not in allowed:
                 findings.append(
-                    Finding("INAPPLICABLE", f"action {rule.action} does not apply to {kind} {value}", rule.line)
+                    Finding(
+                        "INAPPLICABLE", f"action {rule.action} does not apply to {kind} {value}", rule.line, subject=(*triple, value)
+                    )
                 )
         references = (
             ("actor", rule.actor, index.actors),
@@ -559,13 +668,13 @@ def check_rules(module: Module, index: Index) -> list[Finding]:
         )
         for kind, value, known in references:
             if value != "*" and value not in known:
-                findings.append(Finding("UNDEFINED", f"{kind} {value} is not defined", rule.line))
+                findings.append(Finding("UNDEFINED", f"{kind} {value} is not defined", rule.line, subject=(*triple, value)))
         for condition in rule.conditions:
-            findings.extend(check_condition(condition, index, rule.line))
-        findings.extend(check_assumptions(rule.assumes, index, rule.line, "a rule"))
+            findings.extend(check_condition(condition, index, rule.line, triple))
+        findings.extend(check_assumptions(rule.assumes, index, rule.line, "a rule", triple))
         if rule.requires and rule.requires not in index.entities and rule.requires not in index.enums:
             findings.append(
-                Finding("UNDEFINED", f"required item {rule.requires} is not defined", rule.line)
+                Finding("UNDEFINED", f"required item {rule.requires} is not defined", rule.line, subject=(*triple, rule.requires))
             )
     return findings
 
@@ -580,6 +689,7 @@ def check_permissions(module: Module, index: Index) -> list[Finding]:
             continue
         outcomes = triple_outcomes(module, index, actor, action, resource)
         label = f"{actor} {action} {resource}"
+        triple = (actor, action, resource)
         matching = [rule for rule in module.rules if rule_matches(rule, actor, action, resource)]
         line = matching[0].line if matching else index.action_lines[action]
         if outcomes is None:
@@ -589,7 +699,7 @@ def check_permissions(module: Module, index: Index) -> list[Finding]:
                 clash = solve(index, variables, And(list(applies.values())))
                 gap = solve(index, variables, Not(Or(list(applies.values()))))
             except Undecided:
-                findings.append(Finding("TOO_LARGE", f"the solver could not decide the rules for {label}", line))
+                findings.append(Finding("TOO_LARGE", f"the solver could not decide the rules for {label}", line, subject=triple))
                 continue
             if clash is not None:
                 lines = sorted(
@@ -601,10 +711,14 @@ def check_permissions(module: Module, index: Index) -> list[Finding]:
                         f"{label} is both permitted and forbidden when {describe(clash)}"
                         f" (rules at lines {', '.join(map(str, lines))})",
                         lines[0],
+                        subject=triple,
+                        witness=Witness(clash, []),
                     )
                 )
             if gap is not None:
-                findings.append(Finding("UNCOVERED", f"{label} has no rule when {describe(gap)}", line))
+                findings.append(
+                    Finding("UNCOVERED", f"{label} has no rule when {describe(gap)}", line, subject=triple, witness=Witness(gap, []))
+                )
             continue
         contradictions = [
             outcome
@@ -621,6 +735,8 @@ def check_permissions(module: Module, index: Index) -> list[Finding]:
                     f"{label} is both permitted and forbidden when {describe(sample.assignment)}"
                     f" (rules at lines {', '.join(map(str, lines))}; {len(contradictions)} combinations)",
                     lines[0],
+                    subject=triple,
+                    witness=Witness(sample.assignment, []),
                 )
             )
         if uncovered:
@@ -631,6 +747,8 @@ def check_permissions(module: Module, index: Index) -> list[Finding]:
                     "UNCOVERED",
                     f"{label} has no rule when {listed}{more} ({len(uncovered)} combinations)",
                     line,
+                    subject=triple,
+                    witness=Witness(uncovered[0].assignment, []),
                 )
             )
     return findings
@@ -675,19 +793,29 @@ def check_guards(
         if len(group) == 1 and not group[0].conditions and not held:
             continue
         label = f"{state} on {event}"
+        subject = (machine.name, state, event)
         line = (group or held)[0].line
         if held and any(not transition.conditions for transition in group):
-            findings.append(Finding("CONTRADICTION", f"{label} is both an unconditional transition and a guarded {held[0].kind}", line))
+            findings.append(
+                Finding(
+                    "CONTRADICTION",
+                    f"{label} is both an unconditional transition and a guarded {held[0].kind}",
+                    line,
+                    subject=subject,
+                )
+            )
             continue
         if len(group) > 1 and any(not transition.conditions for transition in group):
             destinations = {transition.target for transition in group}
             if len(destinations) > 1:
                 findings.append(
-                    Finding("CONTRADICTION", f"{label} leads to {', '.join(sorted(destinations))}", line)
+                    Finding("CONTRADICTION", f"{label} leads to {', '.join(sorted(destinations))}", line, subject=subject)
                 )
             elif len({transition_outcome(transition) for transition in group}) > 1:
                 changed = "counters" if len({transition_outcome(transition)[1] for transition in group}) > 1 else "fields"
-                findings.append(Finding("CONTRADICTION", f"{label} changes the {changed} in different ways", line))
+                findings.append(
+                    Finding("CONTRADICTION", f"{label} changes the {changed} in different ways", line, subject=subject)
+                )
             continue
         variables = set().union(*(guard_enums(item.conditions, index) for item in (*group, *held)))
         assignments = worlds(index, variables)
@@ -704,12 +832,26 @@ def check_guards(
                 clash = solve(index, variables, Or([*clashes, And([Or(moves), Or(holds)])]))
                 gap = None if (state, event) in else_covered else solve(index, variables, Not(Or([*moves, *holds])))
             except Undecided:
-                findings.append(Finding("TOO_LARGE", f"the solver could not decide the outcomes of {label}", line))
+                findings.append(
+                    Finding("TOO_LARGE", f"the solver could not decide the outcomes of {label}", line, subject=subject)
+                )
                 continue
             if clash is not None:
-                findings.append(Finding("CONTRADICTION", f"{label} has conflicting outcomes when {describe(clash)}", line))
+                findings.append(
+                    Finding(
+                        "CONTRADICTION",
+                        f"{label} has conflicting outcomes when {describe(clash)}",
+                        line,
+                        subject=subject,
+                        witness=Witness(clash, []),
+                    )
+                )
             if gap is not None:
-                findings.append(Finding("UNCOVERED", f"{label} has no outcome when {describe(gap)}", line))
+                findings.append(
+                    Finding(
+                        "UNCOVERED", f"{label} has no outcome when {describe(gap)}", line, subject=subject, witness=Witness(gap, [])
+                    )
+                )
             continue
         conflicts = []
         gaps = []
@@ -722,12 +864,24 @@ def check_guards(
                 gaps.append(assignment)
         if conflicts:
             findings.append(
-                Finding("CONTRADICTION", f"{label} has conflicting outcomes when {describe(conflicts[0])} ({len(conflicts)} combinations)", line)
+                Finding(
+                    "CONTRADICTION",
+                    f"{label} has conflicting outcomes when {describe(conflicts[0])} ({len(conflicts)} combinations)",
+                    line,
+                    subject=subject,
+                    witness=Witness(conflicts[0], []),
+                )
             )
         if gaps:
             listed = "; ".join(describe(a) for a in gaps[:SAMPLE_LIMIT])
             findings.append(
-                Finding("UNCOVERED", f"{label} has no outcome when {listed} ({len(gaps)} combinations)", line)
+                Finding(
+                    "UNCOVERED",
+                    f"{label} has no outcome when {listed} ({len(gaps)} combinations)",
+                    line,
+                    subject=subject,
+                    witness=Witness(gaps[0], []),
+                )
             )
     return findings
 
@@ -738,44 +892,83 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
     events = set(machine.events)
     name = machine.name
     if not machine.initial:
-        findings.append(Finding("MISSING", f"machine {name} has no initial state", machine.line))
+        findings.append(Finding("MISSING", f"machine {name} has no initial state", machine.line, subject=(name, "initial")))
     elif machine.initial not in states:
-        findings.append(Finding("UNDEFINED", f"initial state {machine.initial} is not a state", machine.line))
+        findings.append(
+            Finding("UNDEFINED", f"initial state {machine.initial} is not a state", machine.line, subject=(name, machine.initial))
+        )
     if not machine.terminals and not machine.cyclic:
-        findings.append(Finding("MISSING", f"machine {name} has no terminal state and is not cyclic", machine.line))
+        findings.append(
+            Finding("MISSING", f"machine {name} has no terminal state and is not cyclic", machine.line, subject=(name, "terminal"))
+        )
     for terminal in machine.terminals:
         if terminal not in states:
-            findings.append(Finding("UNDEFINED", f"terminal state {terminal} is not a state", machine.line))
+            findings.append(
+                Finding("UNDEFINED", f"terminal state {terminal} is not a state", machine.line, subject=(name, terminal))
+            )
     forward: dict[str, set[str]] = {}
     backward: dict[str, set[str]] = {}
     targets: dict[tuple[str, str], set[str]] = {}
     grouped: dict[tuple[str, str], list[Transition]] = {}
     for transition in machine.transitions:
         label = f"{transition.source} -> {transition.target} on {transition.event}"
+        owner = (name, transition.source, transition.event, transition.target)
         valid = True
         for state in (transition.source, transition.target):
             if state not in states:
-                findings.append(Finding("UNDEFINED", f"state {state} in {label} is not a state", transition.line))
+                findings.append(
+                    Finding("UNDEFINED", f"state {state} in {label} is not a state", transition.line, subject=(*owner, state))
+                )
                 valid = False
         if transition.event not in events:
-            findings.append(Finding("UNDEFINED", f"event {transition.event} in {label} is not an event", transition.line))
+            findings.append(
+                Finding(
+                    "UNDEFINED",
+                    f"event {transition.event} in {label} is not an event",
+                    transition.line,
+                    subject=(*owner, transition.event),
+                )
+            )
             valid = False
-        findings.extend(check_assumptions(transition.assumes, index, transition.line, label))
+        findings.extend(check_assumptions(transition.assumes, index, transition.line, label, owner))
         if not transition.actors:
-            findings.append(Finding("OWNERLESS", f"{label} has no actor", transition.line))
+            findings.append(Finding("OWNERLESS", f"{label} has no actor", transition.line, subject=owner))
         for actor in transition.actors:
             if actor not in index.actors:
-                findings.append(Finding("UNDEFINED", f"actor {actor} in {label} is not defined", transition.line))
+                findings.append(
+                    Finding("UNDEFINED", f"actor {actor} in {label} is not defined", transition.line, subject=(*owner, actor))
+                )
         for condition in transition.conditions:
-            findings.extend(check_condition(condition, index, transition.line))
+            findings.extend(check_condition(condition, index, transition.line, owner))
         for counter, operator, amount in transition.effects:
             maximum = machine.counters.get(counter)
             if maximum is None:
-                findings.append(Finding("UNDEFINED", f"counter {counter} in {label} is not a counter of {name}", transition.line))
+                findings.append(
+                    Finding(
+                        "UNDEFINED",
+                        f"counter {counter} in {label} is not a counter of {name}",
+                        transition.line,
+                        subject=(*owner, counter),
+                    )
+                )
             elif operator == "=" and not 0 <= amount <= maximum:
-                findings.append(Finding("UNDEFINED", f"{counter} = {amount} in {label} is outside 0..{maximum}", transition.line))
+                findings.append(
+                    Finding(
+                        "UNDEFINED",
+                        f"{counter} = {amount} in {label} is outside 0..{maximum}",
+                        transition.line,
+                        subject=(*owner, counter),
+                    )
+                )
             elif operator == "+" and amount <= 0:
-                findings.append(Finding("UNDEFINED", f"{counter} + {amount} in {label} does not increase the counter", transition.line))
+                findings.append(
+                    Finding(
+                        "UNDEFINED",
+                        f"{counter} + {amount} in {label} does not increase the counter",
+                        transition.line,
+                        subject=(*owner, counter),
+                    )
+                )
         if valid:
             forward.setdefault(transition.source, set()).add(transition.target)
             backward.setdefault(transition.target, set()).add(transition.source)
@@ -785,12 +978,15 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
     else_covered: set[tuple[str, str]] = set()
     guarded_handlings: dict[tuple[str, str], list[Handling]] = {}
     for handling in machine.handlings:
+        owner = (name, handling.state, handling.event)
         for kind, value, known in (("state", handling.state, states), ("event", handling.event, events)):
             if value != "*" and value not in known:
-                findings.append(Finding("UNDEFINED", f"{kind} {value} in {handling.kind} is not defined", handling.line))
-        findings.extend(check_assumptions(handling.assumes, index, handling.line, handling.kind))
+                findings.append(
+                    Finding("UNDEFINED", f"{kind} {value} in {handling.kind} is not defined", handling.line, subject=(*owner, value))
+                )
+        findings.extend(check_assumptions(handling.assumes, index, handling.line, handling.kind, owner))
         for condition in handling.conditions:
-            findings.extend(check_condition(condition, index, handling.line))
+            findings.extend(check_condition(condition, index, handling.line, owner))
         pairs = (
             [(state, handling.event) for state in machine.states]
             if handling.state == "*"
@@ -809,7 +1005,12 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
                 else_covered.add(pair)
             elif handling.state != "*":
                 findings.append(
-                    Finding("CONTRADICTION", f"{pair[0]} on {pair[1]} is both a transition and {handling.kind}", handling.line)
+                    Finding(
+                        "CONTRADICTION",
+                        f"{pair[0]} on {pair[1]} is both a transition and {handling.kind}",
+                        handling.line,
+                        subject=(name, *pair),
+                    )
                 )
     findings.extend(check_guards(machine, grouped, else_covered, index, guarded_handlings))
     handled |= set(guarded_handlings)
@@ -817,25 +1018,38 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
         reachable = reachable_from(machine.initial, forward)
         for state in machine.states:
             if state not in reachable:
-                findings.append(Finding("UNREACHABLE", f"state {state} of {name} cannot be reached", machine.line))
+                findings.append(
+                    Finding("UNREACHABLE", f"state {state} of {name} cannot be reached", machine.line, subject=(name, state))
+                )
     valid_terminals = [terminal for terminal in machine.terminals if terminal in states]
     if machine.cyclic and machine.initial in states:
         can_return = reachable_from(machine.initial, backward)
         for state in machine.states:
             if state not in can_return:
-                findings.append(Finding("TRAP", f"state {state} of {name} cannot return to the initial state", machine.line))
+                findings.append(
+                    Finding(
+                        "TRAP", f"state {state} of {name} cannot return to the initial state", machine.line, subject=(name, state)
+                    )
+                )
     elif valid_terminals:
         can_finish: set[str] = set()
         for terminal in valid_terminals:
             can_finish |= reachable_from(terminal, backward)
         for state in machine.states:
             if state not in can_finish:
-                findings.append(Finding("TRAP", f"state {state} of {name} cannot reach a terminal state", machine.line))
+                findings.append(
+                    Finding("TRAP", f"state {state} of {name} cannot reach a terminal state", machine.line, subject=(name, state))
+                )
     for state in machine.states:
         missing = [event for event in machine.events if (state, event) not in handled]
         if missing:
             findings.append(
-                Finding("UNHANDLED", f"state {state} of {name} has no transition or handling for {', '.join(missing)}", machine.line)
+                Finding(
+                    "UNHANDLED",
+                    f"state {state} of {name} has no transition or handling for {', '.join(missing)}",
+                    machine.line,
+                    subject=(name, state),
+                )
             )
     return findings
 
@@ -848,16 +1062,30 @@ def check_enums(module: Module, index: Index) -> list[Finding]:
             counts[value] = counts.get(value, 0) + 1
         for value, count in counts.items():
             if count > 1:
-                findings.append(Finding("DUPLICATE", f"value {value} of {enum.name} is listed {count} times", enum.line))
+                findings.append(
+                    Finding("DUPLICATE", f"value {value} of {enum.name} is listed {count} times", enum.line, subject=(enum.name, value))
+                )
         stored_counts: dict[str, list[str]] = {}
         for value, text in enum.stored.items():
             stored_counts.setdefault(text, []).append(value)
             if value not in enum.values:
-                findings.append(Finding("UNDEFINED", f"stored text for {value}, which is not a value of {enum.name}", enum.line))
+                findings.append(
+                    Finding(
+                        "UNDEFINED",
+                        f"stored text for {value}, which is not a value of {enum.name}",
+                        enum.line,
+                        subject=(enum.name, value),
+                    )
+                )
         for text, values in stored_counts.items():
             if len(values) > 1:
                 findings.append(
-                    Finding("DUPLICATE", f"values {', '.join(values)} of {enum.name} share the stored text {text!r}", enum.line)
+                    Finding(
+                        "DUPLICATE",
+                        f"values {', '.join(values)} of {enum.name} share the stored text {text!r}",
+                        enum.line,
+                        subject=(enum.name, *values),
+                    )
                 )
     return findings
 
@@ -885,7 +1113,11 @@ def check_system(module: Module, index: Index) -> list[Finding]:
         for invariant, (formula, enums) in obligations
         if enums & interesting and not enums <= interesting
     ]
-    pruning = [(formula, enums) for formula, enums in index.premise_terms if enums & interesting]
+    pruning = [
+        (premise, formula, enums)
+        for premise, (formula, enums) in zip(module.premises, index.premise_terms)
+        if enums & interesting
+    ]
     if not (machines and (counters or guarded or watched or mixed or pruning or rigid)) and not module.assertions:
         return []
     counter_order = [counter for _, counter in counters]
@@ -926,6 +1158,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                         f"{transition.source} -> {transition.target} on {transition.event} of {machine.name}"
                         " has too many enum combinations to check against the invariants",
                         transition.line,
+                        subject=(machine.name, transition.source, transition.event, transition.target),
                     )
                 )
                 scope = [{}]
@@ -937,7 +1170,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                 updates.append((counter, Assign(str(amount)) if operator == "=" else Increase(amount, ceiling)))
             free, facts = block(variables, [])
             known = closure(index, variables) | interesting
-            after = [formula for formula, enums in pruning if enums <= known]
+            after = [formula for _, formula, enums in pruning if enums <= known]
             label = f"{machine.name}: {transition.event}"
             actions.append(Action(label, machine.name, transition, transition.conditions, updates, free, facts, after))
             scopes[id(actions[-1])] = scope
@@ -946,17 +1179,25 @@ def check_system(module: Module, index: Index) -> list[Finding]:
     describe_path = system.path
 
     def start_problem(start: dict[str, str]) -> Finding | None:
-        for _, _, enums in mixed:
+        for invariant, _, enums in mixed:
             scope = worlds(index, enums - interesting)
             if scope is not None and not any(agrees(world, start) for world in scope):
                 message = f"no enum values satisfy the invariants at the start ({describe(start)})"
-                return Finding("INVARIANT_VIOLATED", message, index.fact_line)
-        for formula, enums in pruning:
+                return Finding(
+                    "INVARIANT_VIOLATED", message, index.fact_line, subject=(invariant.name,), witness=Witness(start, [])
+                )
+        for premise, formula, enums in pruning:
             scope = worlds(index, enums - interesting) if enums - interesting else [{}]
             if scope is not None and not any(
                 agrees(world, start) and evaluate(formula, {**world, **start}, {}, index) for world in scope
             ):
-                return Finding("CONTRADICTION", f"the assumptions rule out the start ({describe(start)})", index.fact_line)
+                return Finding(
+                    "CONTRADICTION",
+                    f"the assumptions rule out the start ({describe(start)})",
+                    index.fact_line,
+                    subject=(premise.name,),
+                    witness=Witness(start, []),
+                )
         return None
 
     domains = [index.enums[name].values for name in rigid]
@@ -976,13 +1217,13 @@ def check_system(module: Module, index: Index) -> list[Finding]:
             problems.append(problem)
     if not seen and size <= SYSTEM_LIMIT:
         message = "no values of the fixed fields satisfy the invariants"
-        findings.append(problems[0] if problems else Finding("CONTRADICTION", message, index.fact_line))
+        findings.append(problems[0] if problems else Finding("CONTRADICTION", message, index.fact_line, subject=tuple(rigid)))
     queue = deque(seen)
 
     def solved() -> list[Finding]:
         openings = [([], settled)]
         openings += [block(enums - interesting, []) for _, _, enums in mixed]
-        openings += [block(enums - interesting, [formula]) for formula, enums in pruning]
+        openings += [block(enums - interesting, [formula]) for _, formula, enums in pruning]
         opening = {machine.name: machine.initial for machine in machines}
         opening.update({counter: "0" for counter in counter_order})
         opening.update(mutable)
@@ -994,6 +1235,7 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                 "the combined state space is too large to enumerate, so only invariants over machine states,"
                 " unreachable states, and assertions without can were checked",
                 machines[0].line,
+                subject=tuple(machine.name for machine in machines),
             )
         ]
         for position, (invariant, formula) in enumerate(watched):
@@ -1001,7 +1243,11 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                 continue
             answer = index.symbolic.reach(([], [Not(formula)]))
             if answer is True:
-                result.append(Finding("TOO_LARGE", f"the solver could not decide invariant {invariant.name}", invariant.line))
+                result.append(
+                    Finding(
+                        "TOO_LARGE", f"the solver could not decide invariant {invariant.name}", invariant.line, subject=(invariant.name,)
+                    )
+                )
             elif answer:
                 route, state = answer
                 result.append(
@@ -1009,6 +1255,8 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                         "INVARIANT_VIOLATED",
                         f"invariant {invariant.name} over machine states fails after: {solved_path(route, state, rigid)} ({describe(state)})",
                         invariant.line,
+                        subject=(invariant.name,),
+                        witness=Witness(state, list(route)),
                     )
                 )
         for machine in machines:
@@ -1020,7 +1268,12 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                     continue
                 if index.symbolic.reach(([], [Atom(machine.name, "=", state)])) is False:
                     result.append(
-                        Finding("UNREACHABLE", f"state {state} of {machine.name} is never reached once guards and counters are applied", machine.line)
+                        Finding(
+                            "UNREACHABLE",
+                            f"state {state} of {machine.name} is never reached once guards and counters are applied",
+                            machine.line,
+                            subject=(machine.name, state),
+                        )
                     )
         return result
 
@@ -1038,6 +1291,8 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                         "INVARIANT_VIOLATED",
                         f"invariant {invariant.name} over machine states fails after: {describe_path(config)} ({describe(assignment)})",
                         invariant.line,
+                        subject=(invariant.name,),
+                        witness=Witness(assignment, system.labels(config)),
                     )
                 )
         for action in actions:
@@ -1066,6 +1321,8 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                             f"{counter} can exceed {bounds.get(counter, limits[counter])} on {transition.source} -> {transition.target}"
                             f" on {transition.event} after: {describe_path(config)}",
                             transition.line,
+                            subject=(action.machine, transition.source, transition.event, transition.target, counter),
+                            witness=system.witness(config),
                         )
                     )
             if overflowing:
@@ -1098,6 +1355,8 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                                 f"invariant {invariant.name} over machine states and enum values fails after: {path}"
                                 f" ({describe(result)})",
                                 invariant.line,
+                                subject=(invariant.name,),
+                                witness=Witness(result, [*system.labels(config), action.label]),
                             )
                         )
                         break
@@ -1120,7 +1379,12 @@ def check_system(module: Module, index: Index) -> list[Finding]:
         for state in machine.states:
             if state in statically and state not in reached:
                 findings.append(
-                    Finding("UNREACHABLE", f"state {state} of {machine.name} is never reached once guards and counters are applied", machine.line)
+                    Finding(
+                        "UNREACHABLE",
+                        f"state {state} of {machine.name} is never reached once guards and counters are applied",
+                        machine.line,
+                        subject=(machine.name, state),
+                    )
                 )
         goals = {machine.initial} if machine.cyclic else set(machine.terminals)
         finishing = {config for config in seen if config[number] in goals}
@@ -1143,6 +1407,8 @@ def check_system(module: Module, index: Index) -> list[Finding]:
                         f"state {state} of {machine.name} cannot {aim} once guards and counters are applied"
                         f" after: {describe_path(stuck)}",
                         machine.line,
+                        subject=(machine.name, state),
+                        witness=system.witness(stuck),
                     )
                 )
     index.system = system
@@ -1161,23 +1427,34 @@ def solved_assertions(module: Module, index: Index) -> list[Finding]:
         return findings
     for assertion in module.assertions:
         label = f"assertion {assertion.name}"
+        subject = (assertion.name,)
         modal = outer_cans(assertion.formula)
         if modal:
             used = "can" if isinstance(modal[0], Can) else "eventually"
-            findings.append(Finding("TOO_LARGE", f"{label} uses {used}, which needs the enumerated state space", assertion.line))
+            findings.append(
+                Finding("TOO_LARGE", f"{label} uses {used}, which needs the enumerated state space", assertion.line, subject=subject)
+            )
             continue
         chosen = closure(index, free_enums(assertion.formula, index) - set(system.states))
         facts = [formula for formula, enums in index.invariant_terms if enums and enums <= chosen]
         wanted = assertion.formula if assertion.mode == "reachable" else Not(assertion.formula)
         answer = system.reach((sorted(chosen - set(system.states)), [*facts, wanted]))
         if answer is True:
-            findings.append(Finding("TOO_LARGE", f"the solver could not decide {label}", assertion.line))
+            findings.append(Finding("TOO_LARGE", f"the solver could not decide {label}", assertion.line, subject=subject))
         elif assertion.mode == "reachable" and answer is False:
-            findings.append(Finding("ASSERTION_FAILED", f"{label} holds in no reachable state", assertion.line))
+            findings.append(Finding("ASSERTION_FAILED", f"{label} holds in no reachable state", assertion.line, subject=subject))
         elif assertion.mode == "always" and answer:
             route, state = answer
             where = f"after: {solved_path(route, state, module.rigid)}" if route else "at the start"
-            findings.append(Finding("ASSERTION_FAILED", f"{label} fails {where} ({describe(state)})", assertion.line))
+            findings.append(
+                Finding(
+                    "ASSERTION_FAILED",
+                    f"{label} fails {where} ({describe(state)})",
+                    assertion.line,
+                    subject=subject,
+                    witness=Witness(state, list(route)),
+                )
+            )
     return findings
 
 
@@ -1203,9 +1480,11 @@ def check_fairness(module: Module, index: Index) -> list[Finding]:
     for line, machine, event in module.fair:
         copies = [found for found in module.machines if found.name.split(".")[-1] == machine]
         if not copies:
-            findings.append(Finding("UNDEFINED", f"machine {machine} of fair is not defined", line))
+            findings.append(Finding("UNDEFINED", f"machine {machine} of fair is not defined", line, subject=(machine,)))
         elif event not in copies[0].events:
-            findings.append(Finding("UNDEFINED", f"event {event} of fair is not an event of {machine}", line))
+            findings.append(
+                Finding("UNDEFINED", f"event {event} of fair is not an event of {machine}", line, subject=(machine, event))
+            )
         if system is None:
             continue
         for action in system.actions:
@@ -1213,7 +1492,7 @@ def check_fairness(module: Module, index: Index) -> list[Finding]:
                 continue
             if action.free:
                 message = f"fair {machine}.{event} reads {', '.join(action.free)}, which changes freely, so nothing makes the event happen"
-                findings.append(Finding("UNDEFINED", message, line))
+                findings.append(Finding("UNDEFINED", message, line, subject=(machine, event)))
                 break
             system.fair.add(action.label)
     return findings
@@ -1361,12 +1640,17 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
 
     for assertion in module.assertions:
         label = f"assertion {assertion.name}"
+        subject = (assertion.name,)
         if unscoped(assertion.formula):
-            findings.append(Finding("TOO_LARGE", f"{label} has too many enum combinations to enumerate", assertion.line))
+            findings.append(
+                Finding("TOO_LARGE", f"{label} has too many enum combinations to enumerate", assertion.line, subject=subject)
+            )
             continue
         if assertion.mode == "reachable":
             if not any(holds for config in system.seen for _, holds in states_of(assertion.formula, config)):
-                findings.append(Finding("ASSERTION_FAILED", f"{label} holds in no reachable state", assertion.line))
+                findings.append(
+                    Finding("ASSERTION_FAILED", f"{label} holds in no reachable state", assertion.line, subject=subject)
+                )
             continue
         failure = next(
             (
@@ -1382,7 +1666,15 @@ def check_assertions(module: Module, index: Index) -> list[Finding]:
             config, state = failure
             where = "at the start" if system.seen[config] is None else f"after: {system.path(config)}"
             reason = stall(assertion.formula, config)
-            findings.append(Finding("ASSERTION_FAILED", f"{label} fails {where} ({describe(state)}){reason}", assertion.line))
+            findings.append(
+                Finding(
+                    "ASSERTION_FAILED",
+                    f"{label} fails {where} ({describe(state)}){reason}",
+                    assertion.line,
+                    subject=subject,
+                    witness=Witness(state, system.labels(config)),
+                )
+            )
     return findings
 
 
@@ -1426,7 +1718,14 @@ def check_joint_scenarios(module: Module, index: Index) -> list[Finding]:
         names = {*scenario.start, *scenario.expect, *(machine for machine, _ in scenario.events)}
         unknown = sorted(name for name in names if name not in index.machines)
         if unknown:
-            findings.append(Finding("UNDEFINED", f"scenario {scenario.name} names {', '.join(unknown)}, which is not a machine", scenario.line))
+            findings.append(
+                Finding(
+                    "UNDEFINED",
+                    f"scenario {scenario.name} names {', '.join(unknown)}, which is not a machine",
+                    scenario.line,
+                    subject=(scenario.name, *unknown),
+                )
+            )
             continue
         problems = []
         for machine_name, state in (*scenario.start.items(), *scenario.expect.items()):
@@ -1438,7 +1737,9 @@ def check_joint_scenarios(module: Module, index: Index) -> list[Finding]:
         missing = [name for name in index.machines if name in names and name not in scenario.start]
         problems += [f"{name} has no start state" for name in missing]
         if problems:
-            findings.append(Finding("UNDEFINED", f"scenario {scenario.name}: {'; '.join(problems)}", scenario.line))
+            findings.append(
+                Finding("UNDEFINED", f"scenario {scenario.name}: {'; '.join(problems)}", scenario.line, subject=(scenario.name,))
+            )
             continue
         states = dict(scenario.start)
         counters = {counter: 0 for name in states for counter in index.machines[name].counters}
@@ -1458,6 +1759,8 @@ def check_joint_scenarios(module: Module, index: Index) -> list[Finding]:
                         "SCENARIO_FAILED",
                         f"scenario {scenario.name}: {machine_name}.{event} is not accepted in {states[machine_name]} ({describe(world)})",
                         scenario.line,
+                        subject=(scenario.name, machine_name, event),
+                        witness=Witness(world, []),
                     )
                 )
                 failed = True
@@ -1465,7 +1768,14 @@ def check_joint_scenarios(module: Module, index: Index) -> list[Finding]:
         if not failed:
             differing = [f"{name} is {states[name]} instead of {state}" for name, state in scenario.expect.items() if states[name] != state]
             if differing:
-                findings.append(Finding("SCENARIO_FAILED", f"scenario {scenario.name} ends with {'; '.join(differing)}", scenario.line))
+                findings.append(
+                    Finding(
+                        "SCENARIO_FAILED",
+                        f"scenario {scenario.name} ends with {'; '.join(differing)}",
+                        scenario.line,
+                        subject=(scenario.name,),
+                    )
+                )
     return findings
 
 
@@ -1474,9 +1784,17 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
     for scenario in module.scenarios:
         machine = index.machines.get(scenario.machine)
         if machine is None:
-            findings.append(Finding("UNDEFINED", f"machine {scenario.machine} is not defined", scenario.line))
+            findings.append(
+                Finding(
+                    "UNDEFINED", f"machine {scenario.machine} is not defined", scenario.line, subject=(scenario.name, scenario.machine)
+                )
+            )
             continue
-        problems = [finding for condition in scenario.given for finding in check_condition(condition, index, scenario.line)]
+        problems = [
+            finding
+            for condition in scenario.given
+            for finding in check_condition(condition, index, scenario.line, (scenario.name,))
+        ]
         if problems:
             findings.extend(problems)
             continue
@@ -1486,7 +1804,14 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
         for domain in domains:
             size *= len(domain)
         if size > ENUMERATION_LIMIT:
-            findings.append(Finding("TOO_LARGE", f"scenario {scenario.name} has too many given combinations to enumerate", scenario.line))
+            findings.append(
+                Finding(
+                    "TOO_LARGE",
+                    f"scenario {scenario.name} has too many given combinations to enumerate",
+                    scenario.line,
+                    subject=(scenario.name,),
+                )
+            )
             continue
         givens = [
             given
@@ -1494,12 +1819,27 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
             if all(evaluate(condition, given, {}, index) for condition in scenario.given)
         ]
         if not givens:
-            findings.append(Finding("SCENARIO_FAILED", f"scenario {scenario.name} is given values that no combination satisfies", scenario.line))
+            findings.append(
+                Finding(
+                    "SCENARIO_FAILED",
+                    f"scenario {scenario.name} is given values that no combination satisfies",
+                    scenario.line,
+                    subject=(scenario.name,),
+                )
+            )
         for given in givens:
             failure = replay(machine, scenario, given, index)
             if failure:
                 where = f" when {describe(given)}" if len(givens) > 1 else ""
-                findings.append(Finding("SCENARIO_FAILED", f"scenario {scenario.name}{failure}{where}", scenario.line))
+                findings.append(
+                    Finding(
+                        "SCENARIO_FAILED",
+                        f"scenario {scenario.name}{failure}{where}",
+                        scenario.line,
+                        subject=(scenario.name,),
+                        witness=Witness(given, []) if len(givens) > 1 else None,
+                    )
+                )
                 break
     return findings
 
@@ -1520,51 +1860,81 @@ def replay(machine: Machine, scenario: Scenario, given: dict[str, str], index: I
     return "" if state == scenario.expect else f" ends in {state} instead of {scenario.expect}"
 
 
-def term_type(term: Term, index: Index, line: int, findings: list[Finding]) -> str | None:
+def term_type(term: Term, index: Index, line: int, findings: list[Finding], owner: tuple[str, ...]) -> str | None:
     if isinstance(term, Reference):
         entity = index.entities.get(term.entity)
         if entity is None:
-            findings.append(Finding("UNDEFINED", f"entity {term.entity} is not defined", line))
+            findings.append(Finding("UNDEFINED", f"entity {term.entity} is not defined", line, subject=(*owner, term.entity)))
             return None
         types = dict(entity.fields)
         if term.attribute not in types:
-            findings.append(Finding("UNDEFINED", f"{term.entity}.{term.attribute} is not a field", line))
+            findings.append(
+                Finding(
+                    "UNDEFINED",
+                    f"{term.entity}.{term.attribute} is not a field",
+                    line,
+                    subject=(*owner, term.entity, term.attribute),
+                )
+            )
             return None
         return base_type(types[term.attribute])
-    argument_type = term_type(term.argument, index, line, findings)
+    argument_type = term_type(term.argument, index, line, findings, owner)
     if argument_type is None:
         return None
     if term.function in ("next", "before"):
         if argument_type not in TIME_TYPES:
-            findings.append(Finding("UNIT_MISMATCH", f"{term.function} needs a time value but got {argument_type}", line))
+            findings.append(
+                Finding(
+                    "UNIT_MISMATCH",
+                    f"{term.function} needs a time value but got {argument_type}",
+                    line,
+                    subject=(*owner, term.function),
+                )
+            )
             return None
         return argument_type
     if term.function == "month_of":
         if argument_type != "Day":
-            findings.append(Finding("UNIT_MISMATCH", f"month_of needs a Day but got {argument_type}", line))
+            findings.append(
+                Finding("UNIT_MISMATCH", f"month_of needs a Day but got {argument_type}", line, subject=(*owner, term.function))
+            )
             return None
         return "Month"
-    findings.append(Finding("UNDEFINED", f"function {term.function} is not defined", line))
+    findings.append(Finding("UNDEFINED", f"function {term.function} is not defined", line, subject=(*owner, term.function)))
     return None
 
 
 def check_laws(module: Module, index: Index) -> list[Finding]:
     findings: list[Finding] = []
     for law in module.laws:
-        left = term_type(law.left, index, law.line, findings)
-        right = term_type(law.right, index, law.line, findings)
+        left = term_type(law.left, index, law.line, findings, (law.identifier,))
+        right = term_type(law.right, index, law.line, findings, (law.identifier,))
         if left is not None and right is not None and left != right:
             findings.append(
-                Finding("UNIT_MISMATCH", f"law {law.identifier} compares {left} with {right}", law.line)
+                Finding("UNIT_MISMATCH", f"law {law.identifier} compares {left} with {right}", law.line, subject=(law.identifier,))
             )
     if module.laws and not findings:
         try:
             clashing = conflicting_laws(module.laws)
         except Undecided:
-            return [Finding("TOO_LARGE", "the solver could not decide whether the laws hold together", module.laws[0].line)]
+            return [
+                Finding(
+                    "TOO_LARGE",
+                    "the solver could not decide whether the laws hold together",
+                    module.laws[0].line,
+                    subject=tuple(law.identifier for law in module.laws),
+                )
+            ]
         if clashing:
             names = ", ".join(law.identifier for law in clashing)
-            findings.append(Finding("CONTRADICTION", f"the laws {names} cannot hold together", clashing[0].line))
+            findings.append(
+                Finding(
+                    "CONTRADICTION",
+                    f"the laws {names} cannot hold together",
+                    clashing[0].line,
+                    subject=tuple(law.identifier for law in clashing),
+                )
+            )
     return findings
 
 
@@ -1581,28 +1951,45 @@ def referenced_unknowns(module: Module) -> set[str]:
 def check_unknowns(module: Module, index: Index) -> list[Finding]:
     findings = []
     for constant in module.constants:
-        findings.extend(check_assumptions(constant.assumes, index, constant.line, f"constant {constant.name}"))
+        findings.extend(
+            check_assumptions(constant.assumes, index, constant.line, f"constant {constant.name}", (constant.name,))
+        )
     referenced = referenced_unknowns(module)
     for unknown in module.unknowns:
         attributes = unknown.attributes
+        subject = (unknown.identifier,)
         if unknown.policy == "value" and unknown.identifier not in referenced:
             findings.append(
-                Finding("UNREFERENCED", f"unknown {unknown.identifier} is not assumed by any rule, transition, law, screen, or derivation", unknown.line, blocking=False)
+                Finding(
+                    "UNREFERENCED",
+                    f"unknown {unknown.identifier} is not assumed by any rule, transition, law, screen, or derivation",
+                    unknown.line,
+                    blocking=False,
+                    subject=subject,
+                )
             )
         title = unknown.identifier + (f" ({attributes['label']})" if "label" in attributes else "")
         if "source" not in attributes:
-            findings.append(Finding("MISSING_SOURCE", f"unknown {unknown.identifier} has no source", unknown.line))
+            findings.append(Finding("MISSING_SOURCE", f"unknown {unknown.identifier} has no source", unknown.line, subject=subject))
         if unknown.policy == "structure":
-            findings.append(Finding("UNKNOWN_STRUCTURE", f"the structure {title} is undecided", unknown.line))
+            findings.append(Finding("UNKNOWN_STRUCTURE", f"the structure {title} is undecided", unknown.line, subject=subject))
         elif unknown.policy == "value":
             if "provisional" not in attributes:
                 findings.append(
-                    Finding("UNKNOWN_VALUE", f"unknown {unknown.identifier} has no provisional decision", unknown.line)
+                    Finding("UNKNOWN_VALUE", f"unknown {unknown.identifier} has no provisional decision", unknown.line, subject=subject)
                 )
             elif attributes.get("verified") != "yes":
                 findings.append(
-                    Finding("UNVERIFIED", f"{unknown.identifier} is provisional and unverified", unknown.line, blocking=False)
+                    Finding(
+                        "UNVERIFIED",
+                        f"{unknown.identifier} is provisional and unverified",
+                        unknown.line,
+                        blocking=False,
+                        subject=subject,
+                    )
                 )
         else:
-            findings.append(Finding("UNDEFINED", f"unknown policy {unknown.policy} is not structure or value", unknown.line))
+            findings.append(
+                Finding("UNDEFINED", f"unknown policy {unknown.policy} is not structure or value", unknown.line, subject=subject)
+            )
     return findings

@@ -11,6 +11,7 @@ from typing import assert_never
 from .ground import expand
 from .kernel import Action, Assign, Increase, Update
 from .solver import Block, TransitionSystem, Undecided, conflicting_laws, find_world
+from .syntax import PdlSyntaxError, parse_module
 from .model import (
     And,
     Atom,
@@ -284,6 +285,14 @@ def triple_outcomes(
         )
         for assignment in assignments
     ]
+
+
+def compile_text(text: str, source: Path | None = None) -> tuple[Module | None, list[Finding]]:
+    try:
+        module = parse_module(text, source)
+    except PdlSyntaxError as error:
+        return None, [Finding("SYNTAX", error.message, error.line, path=error.path, key="SYNTAX:")]
+    return module, check(module)
 
 
 def check(module: Module) -> list[Finding]:

@@ -272,8 +272,9 @@ An entry that names nothing in the module is a syntax error, and so is an entry 
 
 ## Findings
 
-A finding is one hole or one note that the compiler reports about a module, with a kind, a source line, and a message. A blocking finding fails the build. The blocking kinds are:
+A finding is one hole or one note that the compiler reports about a module, with a kind, a source file and line, and a message. A blocking finding fails the build. The blocking kinds are:
 
+- `SYNTAX`: the module or a file it imports does not follow this reference.
 - `UNDEFINED`: a name is used but not defined, a clause sets a field without the `var` mark, a value is outside the set of a field, or a `fair` statement names an event whose guard reads a free value.
 - `DUPLICATE`: a name or enum value is defined twice.
 - `CONTRADICTION`: two rules or two clauses give different outcomes for the same case, the assumptions exclude every case, or two laws cannot hold together.

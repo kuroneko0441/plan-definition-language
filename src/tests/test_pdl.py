@@ -1529,11 +1529,50 @@ class ReferenceTest(unittest.TestCase):
             (root / "plans").mkdir()
             (root / "plans" / "door.pdl").write_text(example, encoding="utf-8")
             output = io.StringIO()
-            with contextlib.redirect_stdout(output):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(output):
                 self.assertEqual(main(["build", str(root / "plans"), "--output", str(root / "build")]), 0)
                 self.assertEqual(main(["build", str(root / "missing.pdl"), "--output", str(root / "build")]), 1)
             self.assertTrue((root / "build" / "door.md").is_file())
             self.assertIn("missing.pdl: cannot read the file", output.getvalue())
+
+    def test_compile_text_returns_a_syntax_error_as_a_finding(self):
+        from pdl.checks import compile_text
+
+        module, findings = compile_text("module m\nS : {A\n")
+        self.assertIsNone(module)
+        self.assertEqual([(f.kind, f.line, f.key, f.blocking) for f in findings], [("SYNTAX", 2, "SYNTAX:", True)])
+        self.assertNotIn("line 2", findings[0].message)
+        module, findings = compile_text("module m\nactor X\naction Do\nR {}\n")
+        self.assertIsNotNone(module)
+        self.assertEqual([f.key for f in findings], ["UNCOVERED:X/Do/R"])
+
+    def test_check_prints_json_and_writes_nothing(self):
+        import contextlib
+        import io
+        import json
+        import tempfile
+
+        from pdl.cli import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "m.pdl").write_text("module m\nactor X\naction Do\nR {}\n", encoding="utf-8")
+            (root / "bad.pdl").write_text("module bad\nS : {A\n", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["check", str(root), "--format", "json", "--output", str(root / "build")]), 1)
+            reported = json.loads(output.getvalue())
+            self.assertEqual(
+                [(Path(f["path"]).name, f["line"], f["kind"], f["key"]) for f in reported],
+                [("bad.pdl", 2, "SYNTAX", "SYNTAX:"), ("m.pdl", 3, "UNCOVERED", "UNCOVERED:X/Do/R")],
+            )
+            self.assertEqual(reported[1]["witness"], {"assignment": {}, "path": []})
+            self.assertEqual(reported[1]["subject"], ["X", "Do", "R"])
+            self.assertFalse((root / "build").exists())
+            text = io.StringIO()
+            with contextlib.redirect_stdout(text):
+                main(["check", str(root / "bad.pdl")])
+            self.assertEqual(text.getvalue(), f"{root / 'bad.pdl'}:2: HOLE SYNTAX unexpected end of input\n")
 
     def test_the_complete_example_of_the_reference_builds_clean(self):
         from pdl.reference import reference

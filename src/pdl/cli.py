@@ -1,38 +1,72 @@
 """Command line entry point that builds modules one at a time."""
 
 import argparse
+import json
+import sys
+from dataclasses import asdict
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from .checks import check
+from .checks import Finding, compile_text
+from .model import Module
 from .project import compare
 from .reference import reference
 from .render import render
 from .syntax import PdlSyntaxError, parse_module
 
 
-def build_file(path: Path, output_directory: Path, language: str, draft: bool = False) -> bool:
+def read_module(path: Path) -> tuple[Module | None, list[Finding]] | None:
     try:
-        module = parse_module(path.read_text(encoding="utf-8"), path)
-    except PdlSyntaxError as error:
-        print(f"{error.path or path}: SYNTAX {error}")
-        return False
+        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
-        print(f"{path}: cannot read the file: {error}")
+        print(f"{path}: cannot read the file: {error}", file=sys.stderr)
+        return None
+    return compile_text(text, path)
+
+
+def finding_record(path: Path, finding: Finding) -> dict:
+    return {
+        "path": str(finding.path or path),
+        "line": finding.line,
+        "kind": finding.kind,
+        "key": finding.key,
+        "blocking": finding.blocking,
+        "message": finding.message,
+        "subject": list(finding.subject),
+        "witness": asdict(finding.witness) if finding.witness else None,
+    }
+
+
+def process(path: Path, options: argparse.Namespace, records: list[dict]) -> bool:
+    compiled = read_module(path)
+    if compiled is None:
         return False
-    findings = check(module)
+    module, findings = compiled
+    human = options.format == "text"
     for finding in findings:
-        label = "HOLE" if finding.blocking else "NOTE"
-        print(f"{finding.path or path}:{finding.line}: {label} {finding.kind} {finding.message}")
+        records.append(finding_record(path, finding))
+        if human:
+            label = "HOLE" if finding.blocking else "NOTE"
+            print(f"{finding.path or path}:{finding.line}: {label} {finding.kind} {finding.message}")
     failed = any(finding.blocking for finding in findings)
-    if failed and not draft:
-        print(f"{module.name}: build failed")
+    if module is None or options.command == "check":
+        return not failed
+    if failed and not options.draft:
+        if human:
+            print(f"{module.name}: build failed")
         return False
-    output_directory.mkdir(parents=True, exist_ok=True)
+    options.output.mkdir(parents=True, exist_ok=True)
     suffix = ".draft.md" if failed else ".md"
-    target = output_directory / f"{module.name}{suffix}"
-    target.write_text(render(module, findings, language, draft=failed), encoding="utf-8")
-    print(f"{module.name}: {'draft written to' if failed else 'built'} {target}")
+    target = options.output / f"{module.name}{suffix}"
+    target.write_text(render(module, findings, options.language, draft=failed), encoding="utf-8")
+    if human:
+        print(f"{module.name}: {'draft written to' if failed else 'built'} {target}")
     return not failed
+
+
+def build_file(path: Path, output_directory: Path, language: str, draft: bool = False) -> bool:
+    options = argparse.Namespace(command="build", output=output_directory, language=language, draft=draft, format="text")
+    return process(path, options, [])
 
 
 def expand(paths: list[Path]) -> list[Path]:
@@ -49,10 +83,10 @@ def check_consistency(paths: list[Path]) -> bool:
         try:
             modules.append((path, parse_module(path.read_text(encoding="utf-8"), path)))
         except PdlSyntaxError as error:
-            print(f"{error.path or path}: SYNTAX {error}")
+            print(f"{error.path or path}:{error.line}: HOLE SYNTAX {error.message}")
             clean = False
         except (OSError, UnicodeDecodeError) as error:
-            print(f"{path}: cannot read the file: {error}")
+            print(f"{path}: cannot read the file: {error}", file=sys.stderr)
             clean = False
     findings = compare(modules)
     for finding in findings:
@@ -62,13 +96,22 @@ def check_consistency(paths: list[Path]) -> bool:
     return clean and not any(finding.blocking for finding in findings)
 
 
+def release() -> str:
+    try:
+        return version("plan-definition-language")
+    except PackageNotFoundError:
+        return "unknown, run from a source tree"
+
+
 def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pdl")
-    parser.add_argument("command", choices=["build", "consistency", "reference"])
+    parser.add_argument("command", choices=["build", "check", "consistency", "reference"])
     parser.add_argument("paths", nargs="*", type=Path)
     parser.add_argument("--output", type=Path, default=Path("build"))
     parser.add_argument("--language", choices=["ko", "en"], default="ko")
     parser.add_argument("--draft", action="store_true")
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--version", action="version", version=f"pdl {release()}")
     options = parser.parse_args(arguments)
     if options.command == "reference":
         print(reference(), end="")
@@ -77,5 +120,8 @@ def main(arguments: list[str] | None = None) -> int:
         parser.error(f"{options.command} needs at least one path")
     if options.command == "consistency":
         return 0 if check_consistency(options.paths) else 1
-    results = [build_file(path, options.output, options.language, options.draft) for path in expand(options.paths)]
+    records: list[dict] = []
+    results = [process(path, options, records) for path in expand(options.paths)]
+    if options.format == "json":
+        print(json.dumps(records, ensure_ascii=False, indent=2))
     return 0 if all(results) else 1

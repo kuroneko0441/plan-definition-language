@@ -17,11 +17,15 @@ Append `@v0.2.1` to the URL to install a release.
 pdl build door.pdl                  # writes build/door.md
 pdl build door.pdl --draft          # writes a draft when the module has holes
 pdl build door.pdl --language en --output out
+pdl build plans/                    # builds every module in a directory
+pdl check plans/ --format json      # prints the findings as JSON and writes nothing
 pdl consistency plans/              # compares the modules of one plan
 pdl reference                       # prints the language reference of this release
+pdl --version
 ```
 
-`build` exits with a nonzero status when a module has a hole.
+`build` and `check` exit with a nonzero status when a module has a hole or cannot be read.
+In JSON output, each finding has a `key` that stays the same when its wording or line changes, the `subject` names it concerns, and a `witness` with the counterexample values and event path when it has one.
 The generated sentences are Korean unless `--language en` is given.
 A module in the earlier keyword syntax must first be rewritten with `pdl convert` from `v0.2.1`.
 

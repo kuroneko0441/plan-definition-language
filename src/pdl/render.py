@@ -303,8 +303,12 @@ def render_permissions(
             for action, resource in pairs:
                 if not index.applies(action, actor, resource):
                     continue
-                outcomes = triple_outcomes(module, index, actor, action, resource) or []
-                effects = {frozenset(rule.effect for rule in outcome.rules) for outcome in outcomes}
+                outcomes = triple_outcomes(module, index, actor, action, resource)
+                if outcomes is None:
+                    matching = [rule for rule in module.rules if rule_matches(rule, actor, action, resource)]
+                    effects = {frozenset({rule.effect}) for rule in matching}
+                else:
+                    effects = {frozenset(rule.effect for rule in outcome.rules) for outcome in outcomes}
                 if effects == {frozenset({"permit"})}:
                     result = labels["permit"]
                 elif effects == {frozenset({"forbid"})}:

@@ -16,6 +16,9 @@ def build_file(path: Path, output_directory: Path, language: str, draft: bool = 
     except PdlSyntaxError as error:
         print(f"{error.path or path}: SYNTAX {error}")
         return False
+    except (OSError, UnicodeDecodeError) as error:
+        print(f"{path}: cannot read the file: {error}")
+        return False
     findings = check(module)
     for finding in findings:
         label = "HOLE" if finding.blocking else "NOTE"
@@ -48,6 +51,9 @@ def check_consistency(paths: list[Path]) -> bool:
         except PdlSyntaxError as error:
             print(f"{error.path or path}: SYNTAX {error}")
             clean = False
+        except (OSError, UnicodeDecodeError) as error:
+            print(f"{path}: cannot read the file: {error}")
+            clean = False
     findings = compare(modules)
     for finding in findings:
         label = "HOLE" if finding.blocking else "NOTE"
@@ -71,5 +77,5 @@ def main(arguments: list[str] | None = None) -> int:
         parser.error(f"{options.command} needs at least one path")
     if options.command == "consistency":
         return 0 if check_consistency(options.paths) else 1
-    results = [build_file(path, options.output, options.language, options.draft) for path in options.paths]
+    results = [build_file(path, options.output, options.language, options.draft) for path in expand(options.paths)]
     return 0 if all(results) else 1

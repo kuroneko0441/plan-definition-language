@@ -1515,6 +1515,26 @@ class ReferenceTest(unittest.TestCase):
             self.assertEqual(main(["reference"]), 0)
         self.assertEqual(output.getvalue(), reference())
 
+    def test_build_reads_a_directory_and_reports_an_unreadable_file(self):
+        import contextlib
+        import io
+        import tempfile
+
+        from pdl.cli import main
+        from pdl.reference import reference
+
+        example = reference().split("## Complete example", 1)[1].split("```", 2)[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "plans").mkdir()
+            (root / "plans" / "door.pdl").write_text(example, encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(main(["build", str(root / "plans"), "--output", str(root / "build")]), 0)
+                self.assertEqual(main(["build", str(root / "missing.pdl"), "--output", str(root / "build")]), 1)
+            self.assertTrue((root / "build" / "door.md").is_file())
+            self.assertIn("missing.pdl: cannot read the file", output.getvalue())
+
     def test_the_complete_example_of_the_reference_builds_clean(self):
         from pdl.reference import reference
 
@@ -1591,6 +1611,13 @@ class RenderTest(unittest.TestCase):
         self.assertIn("# 도서관 대출 규칙", document)
         self.assertLess(document.index("## 권한 규칙"), document.index("## 부록"))
         self.assertLess(document.index("### 권한 요약"), len(document))
+
+    def test_a_summary_too_large_to_enumerate_follows_the_rule_effects(self):
+        text = "module m\nS : {A, B}\nactor X\naction Do\nR {}\npermit X Do R: S = A\npermit X Do R: S = B\n"
+        module = parse_module(text)
+        with mock.patch("pdl.checks.worlds", side_effect=static_only):
+            document = render(module, check(module))
+        self.assertIn("- X: R Do 허용", document)
 
     def test_assumptions_are_marked_on_the_lines_that_depend_on_them(self):
         document = self.render_library()

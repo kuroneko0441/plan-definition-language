@@ -64,9 +64,11 @@ Parsed = TypeVar("Parsed")
 
 
 class PdlSyntaxError(Exception):
-    def __init__(self, line: int, message: str):
+    def __init__(self, line: int, message: str, path: Path | None = None):
         super().__init__(f"line {line}: {message}")
         self.line = line
+        self.message = message
+        self.path = path
 
 
 class Token(NamedTuple):
@@ -113,10 +115,10 @@ class TextEntry:
     attributes: dict[str, str]
 
 
-def tokenize(text: str) -> list[Token]:
+def tokenize(text: str, offset: int = 0) -> list[Token]:
     tokens: list[Token] = []
     position = 0
-    line = 1
+    line = offset + 1
     while position < len(text):
         match = TOKEN_PATTERN.match(text, position)
         if match is None:
@@ -765,15 +767,23 @@ class Parser:
             return member in dict(owner.fields)
         return isinstance(owner, Machine) and member in (*owner.states, *owner.events, *owner.counters)
 
+    def refuse_unused(self, entry: TextEntry, allowed: set[str]) -> None:
+        unused = ["a label" if name == "label" else name for name in entry.attributes if name not in allowed]
+        if unused:
+            raise PdlSyntaxError(entry.line, f"text gives {'.'.join(entry.key)} {', '.join(unused)}, which it does not take")
+
     def place_text(self, module: Module, machines: dict[str, Machine], entry: TextEntry) -> None:
         key = entry.key
         text = entry.attributes
         label = text.get("label", "")
         why = text.get("why", "")
         if key == ["module"]:
+            self.refuse_unused(entry, {"label"})
             module.label = label
             return
         if tuple(key) in self.tags:
+            clauses = all(isinstance(item, Transition) for item in self.tags[tuple(key)])
+            self.refuse_unused(entry, {"why", "after"} if clauses else {"why"})
             for item in self.tags[tuple(key)]:
                 item.why = why
                 if isinstance(item, Transition):
@@ -814,26 +824,32 @@ class Parser:
         member = key[1]
         owner = next((candidate for candidate in candidates if self.holds(candidate, member)), candidates[0])
         if isinstance(owner, EnumDefinition) and member in owner.values:
+            self.refuse_unused(entry, {"label", "stored"})
             if label:
                 owner.value_labels[member] = label
             if "stored" in text:
                 owner.stored[member] = text["stored"]
         elif isinstance(owner, EntityDefinition) and member in dict(owner.fields):
+            self.refuse_unused(entry, {"label", "why"})
             if label:
                 owner.field_labels[member] = label
             if why:
                 owner.field_notes[member] = why
-        elif isinstance(owner, Machine) and member in owner.states:
-            owner.state_labels[member] = label
-        elif isinstance(owner, Machine) and member in owner.events:
-            owner.event_labels[member] = label
-        elif isinstance(owner, Machine) and member in owner.counters:
-            owner.counter_labels[member] = label
+        elif isinstance(owner, Machine) and member in (*owner.states, *owner.events, *owner.counters):
+            self.refuse_unused(entry, {"label"})
+            if member in owner.states:
+                owner.state_labels[member] = label
+            elif member in owner.events:
+                owner.event_labels[member] = label
+            else:
+                owner.counter_labels[member] = label
         else:
             raise PdlSyntaxError(entry.line, f"text names {'.'.join(key)}, which is not defined")
 
 
-def merge_imports(module: Module, source: Path | None, merged: set[Path], stack: list[Path]) -> None:
+def merge_imports(
+    module: Module, source: Path | None, merged: set[Path], stack: list[Path], sources: list[tuple[int, Path]]
+) -> None:
     for line, relative in module.imports:
         if source is None:
             raise PdlSyntaxError(line, "an import needs the path of the importing file")
@@ -844,9 +860,12 @@ def merge_imports(module: Module, source: Path | None, merged: set[Path], stack:
             continue
         if not target.is_file():
             raise PdlSyntaxError(line, f"imported file {relative} does not exist")
-        imported = Parser(tokenize(target.read_text(encoding="utf-8"))).module()
+        # Each imported file numbers its lines from its own offset, which no file reaches with its own lines.
+        offset = 1_000_000 * (len(sources) + 1)
+        sources.append((offset, target))
+        imported = Parser(tokenize(target.read_text(encoding="utf-8"), offset)).module()
         merged.add(target)
-        merge_imports(imported, target, merged, [*stack, target])
+        merge_imports(imported, target, merged, [*stack, target], sources)
         module.enums += imported.enums
         module.entities += imported.entities
         module.terms += imported.terms
@@ -858,5 +877,9 @@ def parse_module(text: str, source: Path | None = None) -> Module:
     module = Parser(tokenize(text)).module()
     if module.imports:
         resolved = source.resolve() if source is not None else None
-        merge_imports(module, source, {resolved} if resolved else set(), [resolved] if resolved else [])
+        try:
+            merge_imports(module, source, {resolved} if resolved else set(), [resolved] if resolved else [], module.sources)
+        except PdlSyntaxError as error:
+            path, line = module.locate(error.line)
+            raise PdlSyntaxError(line, error.message, path or source) from None
     return module

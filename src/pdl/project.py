@@ -28,7 +28,8 @@ def collect(path: Path, module: Module) -> dict[str, Entry]:
     entries: dict[str, Entry] = {}
 
     def add(name: str, line: int, category: str, signature: tuple, label: str = "") -> None:
-        entries.setdefault(name, Entry(path, line, category, signature, label))
+        source, line = module.locate(line)
+        entries.setdefault(name, Entry(source or path, line, category, signature, label))
 
     for enum in module.enums:
         stored = tuple(sorted(enum.stored.items()))

@@ -5,6 +5,7 @@ from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from itertools import product
+from pathlib import Path
 from typing import assert_never
 
 from .ground import expand
@@ -53,6 +54,7 @@ class Finding:
     message: str
     line: int
     blocking: bool = True
+    path: Path | None = None
 
 
 @dataclass
@@ -290,17 +292,22 @@ def check(module: Module) -> list[Finding]:
         check_unknowns,
     ):
         findings.extend(step(module, index))
+    for finding in findings:
+        finding.path, finding.line = module.locate(finding.line)
     return findings
 
 
 def check_definitions(module: Module, index: Index) -> list[Finding]:
     first: dict[str, int] = {}
     findings = []
+
+    def place(line: int) -> str:
+        path, number = module.locate(line)
+        return f"line {number}" if path is None else f"line {number} of {path.name}"
+
     for _, name, line in module.definitions:
         if name in first:
-            findings.append(
-                Finding("DUPLICATE", f"{name} is defined twice (lines {first[name]} and {line})", line)
-            )
+            findings.append(Finding("DUPLICATE", f"{name} is defined twice ({place(first[name])} and {place(line)})", line))
         else:
             first[name] = line
     return findings

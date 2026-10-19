@@ -552,6 +552,22 @@ class CapabilityTest(unittest.TestCase):
             with self.assertRaises(PdlSyntaxError):
                 parse_module((root / "a.pdl").read_text(encoding="utf-8"), root / "a.pdl")
 
+    def test_a_problem_in_an_imported_file_names_that_file_and_its_line(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "common.pdl").write_text("module common\n\nactor X\naction Do\n", encoding="utf-8")
+            (root / "broken.pdl").write_text("module broken\n\nS : {On\n", encoding="utf-8")
+            module = parse_module('module m\nimport "common.pdl"\nR {}\n', root / "m.pdl")
+            findings = check(module)
+            self.assertEqual(
+                [(f.kind, f.path, f.line) for f in findings], [("UNCOVERED", (root / "common.pdl").resolve(), 4)]
+            )
+            with self.assertRaises(PdlSyntaxError) as raised:
+                parse_module('module m\nimport "broken.pdl"\n', root / "m.pdl")
+            self.assertEqual((raised.exception.path, raised.exception.line), ((root / "broken.pdl").resolve(), 3))
+
     def test_imported_definition_that_clashes_is_a_duplicate(self):
         import tempfile
         from pathlib import Path as TempPath
@@ -560,7 +576,9 @@ class CapabilityTest(unittest.TestCase):
             root = TempPath(directory)
             (root / "common.pdl").write_text("module common\nS : {On, Off}\n", encoding="utf-8")
             module = parse_module('module m\nimport "common.pdl"\nS : {A, B}\n', root / "m.pdl")
-            self.assertEqual(Counter(f.kind for f in check(module) if f.blocking), Counter({"DUPLICATE": 1}))
+            findings = [f for f in check(module) if f.blocking]
+            self.assertEqual([f.kind for f in findings], ["DUPLICATE"])
+            self.assertIn("(line 3 and line 2 of common.pdl)", findings[0].message)
 
     def test_a_counter_with_matching_guards_passes_and_the_scenario_counts(self):
         self.assertEqual(blocking_kinds(COUNTER_MACHINE), Counter())
@@ -1365,6 +1383,17 @@ text {
 class SyntaxTest(unittest.TestCase):
     def kinds(self, text: str) -> Counter:
         return Counter(f.kind for f in check(syntax.parse_module(text)) if f.blocking)
+
+    def test_a_text_entry_takes_only_what_its_name_can_hold(self):
+        base = (
+            "module m\nS : {A, B}\nE passive { f: Text }\nactor X\naction Do\nR {}\npermit * Do R as r\n"
+            "M : {A, B} init A final {B}\nM.Go @X {\nM = A => M' = B as t\nM = B => ignore\n}\ntext {\n%s\n}\n"
+        )
+        accepted = 'S.A "에이" stored "A"\nE.f "필드" why "x"\nM.A "시작"\nM.Go "진행"\nM.Go.t why "x" after "1일"\nr why "x"'
+        syntax.parse_module(base % accepted)
+        for entry in ('S.A why "x"', 'M.A why "x"', 'M.Go stored "x"', 'E.f stored "x"', 'M.Go.t "진행"', 'r after "1일"', 'r stored "x"'):
+            with self.assertRaises(PdlSyntaxError, msg=entry):
+                syntax.parse_module(base % entry)
 
     def test_a_module_of_relations_builds(self):
         self.assertEqual(self.kinds(BOOKING), Counter())

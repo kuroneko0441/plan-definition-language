@@ -1,6 +1,7 @@
 """Syntax tree for the plan definition language."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Union
 
 
@@ -336,3 +337,10 @@ class Module:
     fair: list[tuple[int, str, str]] = field(default_factory=list)
     predicates: list[Predicate] = field(default_factory=list)
     functions: list[Function] = field(default_factory=list)
+    sources: list[tuple[int, Path]] = field(default_factory=list)
+
+    def locate(self, line: int) -> tuple[Path | None, int]:
+        for offset, path in reversed(self.sources):
+            if line > offset:
+                return path, line - offset
+        return None, line

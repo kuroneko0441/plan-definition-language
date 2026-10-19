@@ -14,12 +14,12 @@ def build_file(path: Path, output_directory: Path, language: str, draft: bool = 
     try:
         module = parse_module(path.read_text(encoding="utf-8"), path)
     except PdlSyntaxError as error:
-        print(f"{path}: SYNTAX {error}")
+        print(f"{error.path or path}: SYNTAX {error}")
         return False
     findings = check(module)
     for finding in findings:
         label = "HOLE" if finding.blocking else "NOTE"
-        print(f"{path}:{finding.line}: {label} {finding.kind} {finding.message}")
+        print(f"{finding.path or path}:{finding.line}: {label} {finding.kind} {finding.message}")
     failed = any(finding.blocking for finding in findings)
     if failed and not draft:
         print(f"{module.name}: build failed")
@@ -46,7 +46,7 @@ def check_consistency(paths: list[Path]) -> bool:
         try:
             modules.append((path, parse_module(path.read_text(encoding="utf-8"), path)))
         except PdlSyntaxError as error:
-            print(f"{path}: SYNTAX {error}")
+            print(f"{error.path or path}: SYNTAX {error}")
             clean = False
     findings = compare(modules)
     for finding in findings:

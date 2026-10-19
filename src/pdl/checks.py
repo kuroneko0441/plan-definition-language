@@ -1486,7 +1486,7 @@ def outer_cans(formula: Formula) -> list[Can | Eventually]:
 def check_fairness(module: Module, index: Index) -> list[Finding]:
     findings = []
     system = index.system
-    for line, machine, event in module.fair:
+    for line, machine, event, _ in module.fair:
         copies = [found for found in module.machines if found.name.split(".")[-1] == machine]
         if not copies:
             findings.append(Finding("UNDEFINED", f"machine {machine} of fair is not defined", line, subject=(machine,)))
@@ -1947,10 +1947,28 @@ def check_laws(module: Module, index: Index) -> list[Finding]:
     return findings
 
 
+def statement_assumptions(module: Module) -> list[tuple[str, tuple[str, ...], int, list[str]]]:
+    owners: list[tuple[str, tuple[str, ...], int, list[str]]] = []
+    for kind, items in (
+        ("constant", module.constants),
+        ("screen", module.screens),
+        ("derivation", module.derivations),
+        ("invariant", module.invariants),
+        ("premise", module.premises),
+        ("property", module.assertions),
+    ):
+        owners += [(f"{kind} {item.name}", (item.name,), item.line, item.assumes) for item in items]
+    owners += [(f"law {law.identifier}", (law.identifier,), law.line, law.assumes) for law in module.laws]
+    owners += [(f"fair {machine}.{event}", (machine, event), line, assumes) for line, machine, event, assumes in module.fair]
+    return owners
+
+
 def referenced_unknowns(module: Module) -> set[str]:
     referenced: set[str] = set()
-    for owner in (*module.rules, *module.laws, *module.screens, *module.derivations, *module.constants):
-        referenced.update(owner.assumes)
+    for rule in module.rules:
+        referenced.update(rule.assumes)
+    for *_, assumes in statement_assumptions(module):
+        referenced.update(assumes)
     for machine in module.machines:
         for item in (*machine.transitions, *machine.handlings):
             referenced.update(item.assumes)
@@ -1959,10 +1977,8 @@ def referenced_unknowns(module: Module) -> set[str]:
 
 def check_unknowns(module: Module, index: Index) -> list[Finding]:
     findings = []
-    for constant in module.constants:
-        findings.extend(
-            check_assumptions(constant.assumes, index, constant.line, f"constant {constant.name}", (constant.name,))
-        )
+    for owner, subject, line, assumes in statement_assumptions(module):
+        findings.extend(check_assumptions(assumes, index, line, owner, subject))
     referenced = referenced_unknowns(module)
     for unknown in module.unknowns:
         attributes = unknown.attributes
@@ -1971,7 +1987,7 @@ def check_unknowns(module: Module, index: Index) -> list[Finding]:
             findings.append(
                 Finding(
                     "UNREFERENCED",
-                    f"unknown {unknown.identifier} is not assumed by any rule, transition, law, screen, or derivation",
+                    f"unknown {unknown.identifier} is not assumed by any rule, transition, constant, law, invariant, premise, property, fair event, screen, or derivation",
                     unknown.line,
                     blocking=False,
                     subject=subject,

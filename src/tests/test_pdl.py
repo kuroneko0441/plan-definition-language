@@ -424,6 +424,33 @@ class ExtensionTest(unittest.TestCase):
         self.assertEqual(sorted(f.kind for f in findings), ["UNREFERENCED", "UNVERIFIED"])
         self.assertFalse(any(f.blocking for f in findings))
 
+    def test_a_formula_statement_names_the_unknowns_it_assumes(self):
+        unknown = 'unknown value a { label "기준" provisional "1" source "s" verified no }\n'
+        for statement in (
+            "inv stays: M = B => S = On assuming %s",
+            "assume given: S = On assuming %s",
+            "prop ends: reachable M = B assuming %s",
+            "fair M.F assuming %s",
+        ):
+            text = GUARDED_IGNORE + unknown + statement % "a" + "\n"
+            module = parse_module(text)
+            findings = check(module)
+            self.assertNotIn("UNREFERENCED", [f.kind for f in findings], statement)
+            self.assertIn("(가정: 기준)", render(module, findings), statement)
+            self.assertEqual(to_text(parse_module(to_text(module))), to_text(module), statement)
+            undeclared = GUARDED_IGNORE + statement % "z" + "\n"
+            self.assertIn("UNDEFINED", blocking_kinds(undeclared), statement)
+
+    def test_every_assuming_list_names_a_declared_unknown(self):
+        base = "module m\nB {\nday: Day\n}\nL {\nbill: B\namount: Money\n}\n"
+        for statement in (
+            "law later: B.day <= next(B.day) assuming z",
+            "screen Bills of B shows B.day assuming z",
+            "derive Total of B : Money from L.amount assuming z",
+        ):
+            messages = [f.message for f in check(parse_module(base + statement + "\n")) if f.kind == "UNDEFINED"]
+            self.assertTrue(any("assumption z of" in message for message in messages), statement)
+
     def test_handling_can_carry_an_assumption_and_a_rationale(self):
         text = GUARDED.replace("M = B => ignore\n", "M = B => ignore assuming a as waits\n") + (
             'unknown value a { provisional "1" source "s" verified no }\ntext { M.Go.waits why "b" }\n'

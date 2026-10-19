@@ -193,7 +193,7 @@ class Writer:
         lines = []
         for keyword, items in (("assume", module.premises), ("inv", module.invariants)):
             for item in items:
-                lines.append(f"{keyword} {item.name}: {formula_source(item.formula)}")
+                lines.append(f"{keyword} {item.name}: {formula_source(item.formula)}{assuming(item.assumes)}")
                 self.text(item.name, why=item.why)
         for law in module.laws:
             lines.append(
@@ -219,10 +219,10 @@ class Writer:
         self.section(lines)
         for machine in module.machines:
             self.machine(machine)
-        lines = [f"fair {machine}.{event}" for _, machine, event in module.fair]
+        lines = [f"fair {machine}.{event}{assuming(assumes)}" for _, machine, event, assumes in module.fair]
         for assertion in module.assertions:
             mode = "" if assertion.mode == "start" else f"{assertion.mode} "
-            lines.append(f"prop {assertion.name}: {mode}{formula_source(assertion.formula)}")
+            lines.append(f"prop {assertion.name}: {mode}{formula_source(assertion.formula)}{assuming(assertion.assumes)}")
             self.text(assertion.name, why=assertion.why)
         for scenario in module.scenarios:
             start = " & ".join(

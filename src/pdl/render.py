@@ -528,18 +528,19 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
     if module.invariants:
         lines += [f"## {labels['invariants']}", ""]
         for invariant in module.invariants:
-            lines.append(f"- {invariant.why or invariant.name}")
+            lines.append(f"- {invariant.why or invariant.name}{assumption_text(invariant.assumes, module, labels)}")
         lines.append("")
     machines = {machine.name: machine for machine in module.machines}
     fair = [
         f"{names.show(machine)}: {machines[machine].event_labels.get(event) or event if language == 'ko' else event}"
-        for _, machine, event in module.fair
+        + assumption_text(assumes, module, labels)
+        for _, machine, event, assumes in module.fair
         if machine in machines
     ]
     for key, items in (
-        ("premises", [item.why or item.name for item in module.premises]),
+        ("premises", [(item.why or item.name) + assumption_text(item.assumes, module, labels) for item in module.premises]),
         ("fair", fair),
-        ("assertions", [item.why or item.name for item in module.assertions]),
+        ("assertions", [(item.why or item.name) + assumption_text(item.assumes, module, labels) for item in module.assertions]),
     ):
         if items:
             lines += [f"## {labels[key]}", ""] + [f"- {item}" for item in items] + [""]

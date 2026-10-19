@@ -551,12 +551,14 @@ class Parser:
 
     def premise(self, module: Module) -> None:
         line, name = self.named_formula("assume")
-        module.premises.append(Premise(line, name, self.implication()))
+        formula = self.implication()
+        module.premises.append(Premise(line, name, formula, assumes=self.assumptions()))
         module.definitions.append(("assume", name, line))
 
     def invariant(self, module: Module) -> None:
         line, name = self.named_formula("inv")
-        module.invariants.append(Invariant(line, name, self.implication()))
+        formula = self.implication()
+        module.invariants.append(Invariant(line, name, formula, assumes=self.assumptions()))
         module.definitions.append(("invariant", name, line))
 
     def assertion(self, module: Module) -> None:
@@ -567,14 +569,15 @@ class Parser:
         self.temporal = True
         formula = self.implication()
         self.temporal = False
-        module.assertions.append(Assertion(line, name, mode, formula))
+        module.assertions.append(Assertion(line, name, mode, formula, assumes=self.assumptions()))
         module.definitions.append(("assert", name, line))
 
     def fairness(self, module: Module) -> None:
         line = self.expect("fair").line
         machine = self.word()
         self.expect(".")
-        module.fair.append((line, machine, self.word()))
+        event = self.word()
+        module.fair.append((line, machine, event, self.assumptions()))
 
     def term(self) -> Term:
         name = self.word()

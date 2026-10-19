@@ -261,6 +261,7 @@ class Invariant:
     name: str
     formula: Formula
     why: str = ""
+    assumes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -296,6 +297,7 @@ class Premise:
     name: str
     formula: Formula
     why: str = ""
+    assumes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -305,6 +307,7 @@ class Assertion:
     mode: str
     formula: Formula
     why: str = ""
+    assumes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -334,7 +337,7 @@ class Module:
     variables: list[EnumDefinition] = field(default_factory=list)
     rigid: list[str] = field(default_factory=list)
     mutable: dict[str, str] = field(default_factory=dict)
-    fair: list[tuple[int, str, str]] = field(default_factory=list)
+    fair: list[tuple[int, str, str, list[str]]] = field(default_factory=list)
     predicates: list[Predicate] = field(default_factory=list)
     functions: list[Function] = field(default_factory=list)
     sources: list[tuple[int, Path]] = field(default_factory=list)

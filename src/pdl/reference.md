@@ -165,6 +165,7 @@ The statements mean:
 - `fair <Machine>.<Event>` assumes that the event happens when it stays possible without end.
 - `law` compares two terms with `=`, `<`, `>`, `<=`, or `>=`. The checker verifies that both sides have the same time unit and that the laws can hold together.
 - The functions `next` and `before` shift a time value, and `month_of` converts a `Day` to a `Month`.
+- `assuming <unknowns>` at the end of an `assume`, `inv`, `prop`, `fair`, or `law` statement names the unknowns that it depends on, as it does for a clause, a rule, a constant, a computed value, and a screen.
 
 ## Named conditions and paths
 
@@ -299,7 +300,7 @@ A finding is one hole or one note that the compiler reports about a module, with
 The non-blocking kinds are notes:
 
 - `UNVERIFIED`: a provisional decision has not been confirmed by the business.
-- `UNREFERENCED`: an unknown value that no rule assumes.
+- `UNREFERENCED`: an unknown value that no statement or clause assumes.
 - `LABEL_DIFFERS`: two modules label one name differently.
 
 ## Modules of one plan

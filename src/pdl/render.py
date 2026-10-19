@@ -494,6 +494,7 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
     unverified = [finding for finding in findings if finding.kind == "UNVERIFIED"]
     if unverified:
         lines += [f"## {labels['unverified']}", "", labels["unverified_note"], ""]
+        reported = {f.subject[0] for f in findings if f.kind in ("UNVERIFIED", "UNKNOWN_VALUE") and f.subject}
         rows = [
             [
                 u.attributes.get("label", u.identifier),
@@ -501,7 +502,7 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
                 u.attributes.get("source", ""),
             ]
             for u in module.unknowns
-            if u.policy == "value" and u.attributes.get("verified") != "yes"
+            if u.policy == "value" and u.attributes.get("verified") != "yes" and u.identifier in reported
         ]
         lines += table([labels["name"], labels["provisional"], labels["source"]], rows)
     if module.terms:

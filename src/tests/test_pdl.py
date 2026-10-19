@@ -551,6 +551,27 @@ class CapabilityTest(unittest.TestCase):
             module = parse_module(text, root / "main.pdl")
             self.assertEqual([f for f in check(module) if f.blocking], [])
 
+    def test_an_imported_unknown_is_reported_where_it_is_assumed(self):
+        import tempfile
+        from pathlib import Path as TempPath
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = TempPath(directory)
+            common = 'module common\nunknown value a { provisional "1" source "s" verified no }\nunknown structure b { source "s" }\n'
+            (root / "common.pdl").write_text(common, encoding="utf-8")
+            base = 'module m\nimport "common.pdl"\nactor X\naction Do\nR {}\n'
+            silent = parse_module(base + "permit X Do R\n", root / "m.pdl")
+            self.assertEqual(check(silent), [])
+            assuming = parse_module(base + "permit X Do R assuming a, b\n", root / "m.pdl")
+            located = [(f.kind, f.path, f.line) for f in check(assuming)]
+            shared = root.resolve() / "common.pdl"
+            self.assertEqual(located, [("UNVERIFIED", shared, 2), ("UNKNOWN_STRUCTURE", shared, 3)])
+            own = [f.kind for f in check(parse_module(common, root / "common.pdl"))]
+            self.assertEqual(sorted(own), ["UNKNOWN_STRUCTURE", "UNREFERENCED", "UNVERIFIED"])
+            self.assertEqual(blocking_kinds(base.replace("import", "#") + "permit X Do R assuming a\n")["UNDEFINED"], 1)
+            twice = parse_module('module m\nimport "common.pdl"\nunknown structure b { source "t" }\n', root / "m.pdl")
+            self.assertIn("DUPLICATE", [f.kind for f in check(twice)])
+
     def test_a_file_imported_twice_is_merged_once(self):
         import tempfile
         from pathlib import Path as TempPath
@@ -1659,6 +1680,18 @@ class ConsistencyTest(unittest.TestCase):
         self.assertEqual(
             self.kinds('module a\nS : {On, Off}\ntext { S "상태" }\n', 'module b\nS : {On, Off}\ntext { S "현황" }\n'),
             Counter({("LABEL_DIFFERS", False): 1}),
+        )
+
+    def test_an_unknown_that_differs_between_modules(self):
+        unknown = 'module %s\nunknown value a { label "%s" provisional "%s" source "s" }\n'
+        self.assertEqual(self.kinds(unknown % ("x", "기준", "1"), unknown % ("y", "기준", "1")), Counter())
+        elsewhere = (unknown % ("y", "기준", "1")).replace('source "s"', 'source "t"')
+        self.assertEqual(self.kinds(unknown % ("x", "기준", "1"), elsewhere), Counter())
+        self.assertEqual(
+            self.kinds(unknown % ("x", "기준", "1"), unknown % ("y", "기준", "2")), Counter({("INCONSISTENT", True): 1})
+        )
+        self.assertEqual(
+            self.kinds(unknown % ("x", "기준", "1"), unknown % ("y", "한도", "1")), Counter({("LABEL_DIFFERS", False): 1})
         )
 
     def test_the_command_reads_a_directory(self):

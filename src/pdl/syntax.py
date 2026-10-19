@@ -59,7 +59,7 @@ TEXT_ATTRIBUTES = ("why", "stored", "after", "mixed")
 UNKNOWN_POLICIES = ("structure", "value")
 UNKNOWN_ATTRIBUTES = ("label", "source", "provisional", "verified", "open")
 UNKNOWN_FLAGS = ("verified", "open")
-IMPORTED_KINDS = ("enum", "entity", "term", "actor", "action", "external")
+IMPORTED_KINDS = ("enum", "entity", "term", "actor", "action", "external", "unknown")
 LABELED = (TermDefinition, EnumDefinition, EntityDefinition, Declaration, Machine, Constant, Derivation, Screen)
 
 
@@ -887,6 +887,7 @@ def merge_imports(
         module.entities += imported.entities
         module.terms += imported.terms
         module.declarations += imported.declarations
+        module.unknowns += imported.unknowns
         module.definitions += [item for item in imported.definitions if item[0] in IMPORTED_KINDS]
 
 

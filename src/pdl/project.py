@@ -5,6 +5,8 @@ from pathlib import Path
 
 from .model import Module
 
+UNKNOWN_COMPARED = ("provisional", "verified", "open")
+
 
 @dataclass
 class Entry:
@@ -57,6 +59,9 @@ def collect(path: Path, module: Module) -> dict[str, Entry]:
             tuple(sorted(machine.counters.items())),
         )
         add(machine.name, machine.line, "machine", signature, machine.label)
+    for unknown in module.unknowns:
+        signature = (unknown.policy, *(unknown.attributes.get(key, "") for key in UNKNOWN_COMPARED))
+        add(unknown.identifier, unknown.line, "unknown", signature, unknown.attributes.get("label", ""))
     return entries
 
 
@@ -82,6 +87,8 @@ def difference(category: str, left: tuple, right: tuple) -> str:
     elif category == "machine":
         labels = ("states", "events", "initial state", "terminal states", "cyclic flag", "counters")
         parts = [f"{label} differ" for label, a, b in zip(labels, left, right) if a != b]
+    elif category == "unknown":
+        parts = [f"{label} {a or 'none'} against {b or 'none'}" for label, a, b in zip(("policy", *UNKNOWN_COMPARED), left, right) if a != b]
     elif left != right:
         parts.append("the definitions differ")
     return "; ".join(parts)

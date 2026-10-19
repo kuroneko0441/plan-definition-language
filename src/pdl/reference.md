@@ -47,7 +47,7 @@ const limit : 1..5 assuming limit_decided
 
 The declarations mean:
 
-- `import` merges the enums, entities, terms, and declarations of another file, resolved relative to the importing file. A cycle or a missing file is a syntax error.
+- `import` merges the enums, entities, terms, declarations, and unknowns of another file, resolved relative to the importing file. A cycle or a missing file is a syntax error.
 - `term` names a concept that the plan uses without modeling it.
 - `<Name> : {…}` declares an enum, which is a closed set of values and a variable that holds one of them.
 - `<Name> { … }` declares an entity with typed fields, an optional `key`, and a `passive` flag. The flag takes the entity out of the permission rules, so the coverage check does not require a rule for it.
@@ -244,6 +244,8 @@ The policy is `value` or `structure`, and the attributes are:
 
 Another policy, another attribute, an attribute given twice, or a `verified` or `open` value other than the word `yes` or `no` is a syntax error. An unknown shares the names of the module, so an unknown named like another definition is a duplicate.
 
+Modules share one question by declaring it in a file that they import. An importing module reports the findings of an imported unknown only when one of its own statements assumes it, at the line of the file that declares it, and only the build of that file reports it as unreferenced.
+
 An unknown value is a parameter inside a rule, such as a limit or a count. A provisional decision lets the build pass, and the generated document lists the decision as an assumption until it is verified. An unknown structure is the existence of a concept or a relation between sets, and the build fails until the structure is decided, because a guessed structure would turn a passing build into a misleading one.
 
 ## Display text
@@ -309,7 +311,7 @@ The non-blocking kinds are notes:
 
 ## Modules of one plan
 
-A plan splits into modules that the compiler builds one at a time, and `pdl consistency` compares them. Entities of the same name may list different fields, because a module lists only the slice of an entity that it uses, and a term is a stub that another module may model. Two modules conflict when they define one name as different kinds of thing, give an enum different values or stored texts, give a field different types, declare different keys, or describe one machine differently.
+A plan splits into modules that the compiler builds one at a time, and `pdl consistency` compares them. Entities of the same name may list different fields, because a module lists only the slice of an entity that it uses, and a term is a stub that another module may model. Two modules conflict when they define one name as different kinds of thing, give an enum different values or stored texts, give a field different types, declare different keys, describe one machine differently, or give one unknown a different policy, provisional decision, `verified` flag, or `open` flag. The source of an unknown may differ, because one question can come from several places.
 
 ## Complete example
 

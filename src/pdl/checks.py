@@ -1983,6 +1983,9 @@ def check_unknowns(module: Module, index: Index) -> list[Finding]:
     for unknown in module.unknowns:
         attributes = unknown.attributes
         subject = (unknown.identifier,)
+        imported = module.locate(unknown.line)[0] is not None
+        if imported and unknown.identifier not in referenced:
+            continue
         if unknown.policy == "value" and unknown.identifier not in referenced:
             findings.append(
                 Finding(

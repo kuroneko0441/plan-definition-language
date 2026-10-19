@@ -1422,6 +1422,23 @@ class SyntaxTest(unittest.TestCase):
             with self.assertRaises(PdlSyntaxError, msg=entry):
                 syntax.parse_module(base % entry)
 
+    def test_an_unknown_takes_only_the_attributes_it_can_hold(self):
+        syntax.parse_module('module m\nunknown value a { label "x" source "s" provisional "1" verified no open yes }')
+        for unknown in (
+            'unknown guess a { source "s" }',
+            'unknown value a { source "s" verfied yes }',
+            'unknown value a { source "s" verified maybe }',
+            'unknown value a { source "s" open "yes" }',
+            'unknown value a { source "s" source "t" }',
+        ):
+            with self.assertRaises(PdlSyntaxError, msg=unknown):
+                syntax.parse_module("module m\n" + unknown)
+
+    def test_an_unknown_shares_the_names_of_the_module(self):
+        unknown = 'unknown structure %s { source "s" }\n'
+        self.assertEqual(self.kinds("module m\n" + unknown % "a" + unknown % "a")["DUPLICATE"], 1)
+        self.assertEqual(self.kinds("module m\nS : {A}\n" + unknown % "S")["DUPLICATE"], 1)
+
     def test_a_module_of_relations_builds(self):
         self.assertEqual(self.kinds(BOOKING), Counter())
 

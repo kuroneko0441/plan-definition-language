@@ -234,11 +234,15 @@ unknown value limit_decided { label "제한 횟수" source "회의록 12행" pro
 unknown structure channel_relation { label "채널과 계정의 관계" source "ERP-PLANNING.md 120행" }
 ```
 
-The attributes are:
+The policy is `value` or `structure`, and the attributes are:
 
+- `label` gives the wording that the generated document shows for the unknown.
 - `source` names where the question came from and is required.
 - `provisional` is the temporary decision for a value unknown and is required for one.
 - `verified yes` records that the business confirmed the decision, and `verified no` that it has not.
+- `open yes` marks a question that the business has not answered, so the document lists it as an open item instead of an assumption.
+
+Another policy, another attribute, an attribute given twice, or a `verified` or `open` value other than the word `yes` or `no` is a syntax error. An unknown shares the names of the module, so an unknown named like another definition is a duplicate.
 
 An unknown value is a parameter inside a rule, such as a limit or a count. A provisional decision lets the build pass, and the generated document lists the decision as an assumption until it is verified. An unknown structure is the existence of a concept or a relation between sets, and the build fails until the structure is decided, because a guessed structure would turn a passing build into a misleading one.
 

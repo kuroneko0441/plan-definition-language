@@ -56,6 +56,9 @@ WORD_ALIASES = {"∀": "all", "∃": "some", "∈": "in"}
 COMPARISON_OPERATORS = ("=", "!=", "<", "<=", ">", ">=")
 LAW_OPERATORS = ("=", "<", ">", "<=", ">=")
 TEXT_ATTRIBUTES = ("why", "stored", "after", "mixed")
+UNKNOWN_POLICIES = ("structure", "value")
+UNKNOWN_ATTRIBUTES = ("label", "source", "provisional", "verified", "open")
+UNKNOWN_FLAGS = ("verified", "open")
 IMPORTED_KINDS = ("enum", "entity", "term", "actor", "action", "external")
 LABELED = (TermDefinition, EnumDefinition, EntityDefinition, Declaration, Machine, Constant, Derivation, Screen)
 
@@ -645,13 +648,24 @@ class Parser:
     def unknown(self, module: Module) -> None:
         line = self.expect("unknown").line
         policy = self.word()
+        if policy not in UNKNOWN_POLICIES:
+            raise PdlSyntaxError(line, f"unknown policy {policy} is not structure or value")
         identifier = self.word()
         attributes: dict[str, str] = {}
         self.expect("{")
         while not self.accept("}"):
-            key = self.word()
-            attributes[key] = self.advance().value
+            token = self.advance()
+            key = token.value
+            if token.kind != "word" or key not in UNKNOWN_ATTRIBUTES:
+                raise PdlSyntaxError(token.line, f"unknown {identifier} does not take {key!r}")
+            if key in attributes:
+                raise PdlSyntaxError(token.line, f"unknown {identifier} gives {key} twice")
+            value = self.advance()
+            if key in UNKNOWN_FLAGS and (value.kind != "word" or value.value not in ("yes", "no")):
+                raise PdlSyntaxError(value.line, f"{key} of unknown {identifier} must be yes or no")
+            attributes[key] = value.value
         module.unknowns.append(Unknown(line, policy, identifier, attributes))
+        module.definitions.append(("unknown", identifier, line))
 
     def scope(self, module: Module) -> None:
         line = self.expect("scope").line

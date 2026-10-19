@@ -2013,8 +2013,4 @@ def check_unknowns(module: Module, index: Index) -> list[Finding]:
                         subject=subject,
                     )
                 )
-        else:
-            findings.append(
-                Finding("UNDEFINED", f"unknown policy {unknown.policy} is not structure or value", unknown.line, subject=subject)
-            )
     return findings

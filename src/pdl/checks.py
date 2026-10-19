@@ -118,13 +118,12 @@ class Index:
         self.unknown_ids = {unknown.identifier for unknown in module.unknowns}
         self.starts = dict(module.mutable)
         obligations = [invariant.formula for invariant in module.invariants]
-        premises = [Not(And([exclusion.left, exclusion.right])) for exclusion in module.exclusions]
-        premises += [premise.formula for premise in module.premises]
+        premises = [premise.formula for premise in module.premises]
         self.obligation_terms = [(formula, free_enums(formula, self)) for formula in obligations]
         self.premise_terms = [(formula, free_enums(formula, self)) for formula in premises]
         self.invariant_terms = self.obligation_terms + self.premise_terms
         self.fact_line = min(
-            (item.line for item in (*module.invariants, *module.exclusions, *module.premises)), default=0
+            (item.line for item in (*module.invariants, *module.premises)), default=0
         )
         self.system: System | None = None
         self.symbolic: TransitionSystem | None = None
@@ -418,7 +417,7 @@ def check_invariants(module: Module, index: Index) -> list[Finding]:
         if all(evaluate(formula, assignment, {}, index) for formula, _ in index.invariant_terms):
             return findings
     return [
-        Finding("CONTRADICTION", "the invariants, assumptions, and exclusions admit no combination of values", index.fact_line)
+        Finding("CONTRADICTION", "the invariants and assumptions admit no combination of values", index.fact_line)
     ]
 
 
@@ -556,9 +555,6 @@ def check_rules(module: Module, index: Index) -> list[Finding]:
             findings.append(
                 Finding("UNDEFINED", f"required item {rule.requires} is not defined", rule.line)
             )
-    for exclusion in module.exclusions:
-        findings.extend(check_condition(exclusion.left, index, exclusion.line))
-        findings.extend(check_condition(exclusion.right, index, exclusion.line))
     return findings
 
 

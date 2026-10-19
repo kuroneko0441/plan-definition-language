@@ -7,128 +7,131 @@ from pdl.checks import check
 from pdl.cli import check_consistency
 from pdl.project import compare
 from pdl.render import render
-from pdl import legacy, syntax
+from pdl import syntax
 from pdl.format import to_text
-from pdl.syntax import PdlSyntaxError
-
-
-def modern(text: str, source: Path | None = None) -> str:
-    return to_text(legacy.parse_module(text, source), imports=False)
-
-
-def parse_module(text: str, source: Path | None = None):
-    return syntax.parse_module(modern(text, source))
+from pdl.syntax import PdlSyntaxError, parse_module
 
 LIBRARY = """
-module library label "도서관 대출 규칙"
+module library
 
-term Renewal label "연장" why "회원이 반납 기한을 늦추는 행위다."
-entity EditReason label "수정 사유" key (text) passive {
-    text: Text label "사유 문구"
+term Renewal
+
+LoanState : {Active, Returned, Lost}
+ListGroup : {Lending, Returning}
+DeskStatus : {Open, Closed}
+
+EditReason key (text) passive {
+    text: Text
 }
-    why "대출 기록을 고친 이유이며 기록마다 남긴다."
 
-enum LoanState label "대출 상태" = Active "대출 중" | Returned "반납됨" | Lost "분실"
-    why "대출 한 건이 가질 수 있는 상태다."
-enum ListGroup label "목록 구분" = Lending "대출" | Returning "반납"
-    why "대출 목록을 가르는 화면의 구분이다."
-enum DeskStatus label "창구 상태" = Open "열림" | Closed "닫힘"
-    why "사서가 창구를 열었는지를 나타낸다."
-
-entity Reader label "이용자" key (card) passive {
-    card: Text label "회원증 번호"
+Reader key (card) passive {
+    card: Text
 }
-    why "도서관에 등록한 사람이다."
 
-entity LoanRecord label "대출 기록" key (id) {
-    id: Text label "식별자"
-    reader: Reader label "이용자"
-    state: LoanState label "대출 상태"
-    lent_on: Day label "대출일" why "책을 빌려 간 날이다."
-    due_month: Month label "반납월"
-    returned_on: Day? label "반납일"
+LoanRecord key (id) {
+    id: Text
+    reader: Reader
+    state: LoanState
+    lent_on: Day
+    due_month: Month
+    returned_on: Day?
 }
-    why "대출 한 건이다. 책 한 권마다 한 건이 생긴다."
 
-derive ReaderStanding label "이용자 상태" of Reader from LoanState mixed Mixed "혼합"
-    why "이용자의 대출 기록마다 상태가 다를 수 있다."
+actor Librarian
+actor Member
+external Archive
+action Lend by (Librarian) on (LoanRecord)
+action Extend by (Member, Librarian) on (LoanRecord)
+action EditRecord by (Librarian) on (LoanRecord)
 
-screen LoanList label "대출 목록" of LoanRecord shows ReaderStanding, ListGroup
-    why "목록에서 이용자별 상태를 한눈에 본다."
-screen LoanDetail label "대출 상세" of LoanRecord shows LoanRecord.state, LoanRecord.lent_on
-
-actor Librarian label "사서", Member label "이용자 계정"
-external Archive label "서고 시스템"
-
-action Lend label "대출 처리" by (Librarian) on (LoanRecord),
-    Extend label "연장" by (Member, Librarian) on (LoanRecord),
-    EditRecord label "기록 수정" by (Librarian) on (LoanRecord)
-
-permit Librarian Lend LoanRecord when DeskStatus = Open
-    why "창구가 열려 있을 때만 대출을 처리한다."
-forbid Librarian Lend LoanRecord when DeskStatus = Closed
-    why "창구가 닫히면 대출을 처리하지 않는다."
-permit Member Extend LoanRecord when LoanState = Active assuming renewal_limit
-    why "대출 중인 책만 연장할 수 있다."
-forbid Member Extend LoanRecord when LoanState = Returned
-    why "반납한 책은 연장할 수 없다."
-forbid Member Extend LoanRecord when LoanState = Lost
-    why "분실한 책은 연장할 수 없다."
-permit Librarian Extend LoanRecord
-    why "사서는 상태와 무관하게 연장을 처리한다."
-permit Librarian EditRecord LoanRecord when LoanState = Active requires EditReason
-    why "대출 중인 기록은 사유를 남기고 고친다."
-permit Librarian EditRecord LoanRecord when LoanState = Returned requires EditReason assuming editing_actor
-    why "반납한 기록도 사유를 남기고 고친다."
-forbid * EditRecord LoanRecord when LoanState = Lost
-    why "분실 처리한 기록은 고칠 수 없다."
+permit Librarian Lend LoanRecord: DeskStatus = Open as open_desk
+forbid Librarian Lend LoanRecord: DeskStatus = Closed as closed_desk
+permit Member Extend LoanRecord: LoanState = Active assuming renewal_limit as extend_active
+forbid Member Extend LoanRecord: LoanState = Returned as extend_returned
+forbid Member Extend LoanRecord: LoanState = Lost as extend_lost
+permit Librarian Extend LoanRecord as librarian_extends
+permit Librarian EditRecord LoanRecord: LoanState = Active requires EditReason as edit_active
+permit Librarian EditRecord LoanRecord: LoanState = Returned requires EditReason assuming editing_actor as edit_returned
+forbid * EditRecord LoanRecord: LoanState = Lost as edit_lost
 
 law due_after_lent: LoanRecord.due_month = next(month_of(LoanRecord.lent_on))
-    why "반납월은 대출일의 다음 달이다."
 
-machine MonthlyReview label "월별 대출 점검"
-    why "점검은 이용자별, 월별로 따로 진행되며 매달 반복된다." {
-    states Preparing "준비 중", Reviewing "점검 중", Closed "마감"
-    initial Preparing
-    cyclic
-    event BeginMonth "월 점검 시작", Finish "점검 마감", Reopen "다시 열기"
+derive ReaderStanding of Reader from LoanState mixed Mixed
+screen LoanList of LoanRecord shows ReaderStanding, ListGroup
+screen LoanDetail of LoanRecord shows LoanRecord.state, LoanRecord.lent_on
 
-    Preparing -> Reviewing on BeginMonth by Librarian assuming month_starter
-        why "매달 점검이 시작되면 사서가 기록을 살핀다."
-    Reviewing -> Closed on Finish by Librarian
-    Closed -> Preparing on Reopen by Archive
-
-    ignore Preparing on Finish
-    ignore Reviewing on BeginMonth
-    ignore Closed on BeginMonth
-    reject * on Reopen assuming unlisted_events
-    reject Closed on Finish
+MonthlyReview : {Preparing, Reviewing, Closed} init Preparing cyclic
+MonthlyReview.BeginMonth @Librarian {
+    MonthlyReview = Preparing => MonthlyReview' = Reviewing assuming month_starter as begin
+    MonthlyReview = Reviewing => ignore
+    MonthlyReview = Closed => ignore
+}
+MonthlyReview.Finish @Librarian {
+    MonthlyReview = Reviewing => MonthlyReview' = Closed
+    MonthlyReview = Preparing => ignore
+    MonthlyReview = Closed => reject
+}
+MonthlyReview.Reopen @Archive {
+    MonthlyReview = Closed => MonthlyReview' = Preparing
+    else reject assuming unlisted_events
 }
 
-unknown value renewal_limit {
-    label "연장 횟수 제한"
-    source "도서관 규정집 3쪽"
-    provisional "한 건당 한 번만 연장할 수 있다"
-}
+unknown value renewal_limit { label "연장 횟수 제한" source "도서관 규정집 3쪽" provisional "한 건당 한 번만 연장할 수 있다" }
+unknown value editing_actor { label "기록을 고치는 주체" source "도서관 규정집 5쪽" provisional "사서가 고친다" verified yes }
+unknown value unlisted_events { label "흐름에 적지 않은 사건의 처리" source "운영 회의록" provisional "적지 않은 사건은 일어나지 않는 것으로 본다" }
+unknown value month_starter { label "월 점검을 시작하는 주체" source "운영 회의록" provisional "사서가 시작한다" open yes }
 
-unknown value editing_actor {
-    label "기록을 고치는 주체"
-    source "도서관 규정집 5쪽"
-    provisional "사서가 고친다"
-    verified yes
-}
-
-unknown value unlisted_events {
-    label "흐름에 적지 않은 사건의 처리"
-    source "운영 회의록"
-    provisional "적지 않은 사건은 일어나지 않는 것으로 본다"
-}
-
-unknown value month_starter {
-    label "월 점검을 시작하는 주체"
-    source "운영 회의록"
-    provisional "사서가 시작한다"
-    open yes
+text {
+    module "도서관 대출 규칙"
+    Renewal "연장" why "회원이 반납 기한을 늦추는 행위다."
+    LoanState "대출 상태" why "대출 한 건이 가질 수 있는 상태다."
+    LoanState.Active "대출 중"
+    LoanState.Returned "반납됨"
+    LoanState.Lost "분실"
+    ListGroup "목록 구분" why "대출 목록을 가르는 화면의 구분이다."
+    ListGroup.Lending "대출"
+    ListGroup.Returning "반납"
+    DeskStatus "창구 상태" why "사서가 창구를 열었는지를 나타낸다."
+    DeskStatus.Open "열림"
+    DeskStatus.Closed "닫힘"
+    EditReason "수정 사유" why "대출 기록을 고친 이유이며 기록마다 남긴다."
+    EditReason.text "사유 문구"
+    Reader "이용자" why "도서관에 등록한 사람이다."
+    Reader.card "회원증 번호"
+    LoanRecord "대출 기록" why "대출 한 건이다. 책 한 권마다 한 건이 생긴다."
+    LoanRecord.id "식별자"
+    LoanRecord.reader "이용자"
+    LoanRecord.state "대출 상태"
+    LoanRecord.lent_on "대출일" why "책을 빌려 간 날이다."
+    LoanRecord.due_month "반납월"
+    LoanRecord.returned_on "반납일"
+    Librarian "사서"
+    Member "이용자 계정"
+    Archive "서고 시스템"
+    Lend "대출 처리"
+    Extend "연장"
+    EditRecord "기록 수정"
+    open_desk why "창구가 열려 있을 때만 대출을 처리한다."
+    closed_desk why "창구가 닫히면 대출을 처리하지 않는다."
+    extend_active why "대출 중인 책만 연장할 수 있다."
+    extend_returned why "반납한 책은 연장할 수 없다."
+    extend_lost why "분실한 책은 연장할 수 없다."
+    librarian_extends why "사서는 상태와 무관하게 연장을 처리한다."
+    edit_active why "대출 중인 기록은 사유를 남기고 고친다."
+    edit_returned why "반납한 기록도 사유를 남기고 고친다."
+    edit_lost why "분실 처리한 기록은 고칠 수 없다."
+    due_after_lent why "반납월은 대출일의 다음 달이다."
+    ReaderStanding "이용자 상태" why "이용자의 대출 기록마다 상태가 다를 수 있다." mixed "혼합"
+    LoanList "대출 목록" why "목록에서 이용자별 상태를 한눈에 본다."
+    LoanDetail "대출 상세"
+    MonthlyReview "월별 대출 점검" why "점검은 이용자별, 월별로 따로 진행되며 매달 반복된다."
+    MonthlyReview.Preparing "준비 중"
+    MonthlyReview.Reviewing "점검 중"
+    MonthlyReview.Closed "마감"
+    MonthlyReview.BeginMonth "월 점검 시작"
+    MonthlyReview.BeginMonth.begin why "매달 점검이 시작되면 사서가 기록을 살핀다."
+    MonthlyReview.Finish "점검 마감"
+    MonthlyReview.Reopen "다시 열기"
 }
 """
 
@@ -136,12 +139,12 @@ UNCOVERED_LIBRARY = """
 module small_library
 actor Librarian
 action Lend by (Librarian) on (LoanRecord)
-enum LoanState = Active | Returned
-entity LoanRecord key (id) {
+LoanState : {Active, Returned}
+LoanRecord key (id) {
     id: Text
     state: LoanState
 }
-permit Librarian Lend LoanRecord when LoanState = Active
+permit Librarian Lend LoanRecord: LoanState = Active
 """
 
 
@@ -152,62 +155,56 @@ def blocking_kinds(text: str) -> Counter:
 COVERED_MACHINE = """
 module covered
 external Ext
-machine M {
-    states A, B
-    initial A
-    terminal B
-    event Go
-    A -> B on Go by Ext
-    ignore B on Go
+M : {A, B} init A final {B}
+M.Go @Ext {
+    M = A => M' = B
+    M = B => ignore
 }
-scenario reaches_end on M {
-    start A
-    events Go, Go
-    expect B
-}
+run reaches_end: M = A -> Go, Go -> M = B
 """
 
 
-LINKED = "module m\nenum S = A | B\nentity Parent\nentity Child { parent: Parent\nstate: S }\n"
+LINKED = "module m\nS : {A, B}\nParent {}\nChild { parent: Parent\nstate: S }\n"
+
+CONFLICTING_RULES = (
+    "module m\nS : {On, Off}\nP : {Open, Closed}\nactor X\naction Do\nR {}\n"
+    "forbid * Do R: S = Off\npermit X Do R: P = Open\n"
+    "forbid * Do R: S = On & P = Closed\n"
+)
 
 
 class SeededHoleTest(unittest.TestCase):
     def test_undefined_key_field(self):
-        text = "module m\nentity A key (missing) { id: Text }"
+        text = "module m\nA key (missing) { id: Text }"
         self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 1}))
 
     def test_undefined_field_type(self):
-        text = "module m\nentity A { id: Nowhere }"
+        text = "module m\nA { id: Nowhere }"
         self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 1}))
 
     def test_duplicate_definition(self):
-        text = "module m\nenum E = A | B\nenum E = C"
+        text = "module m\nE : {A, B}\nE : {C}"
         self.assertEqual(blocking_kinds(text), Counter({"DUPLICATE": 1}))
 
     def test_ownerless_transition(self):
-        text = "module m\nmachine M { states A, B\ninitial A\nterminal B\nevent Go\nA -> B on Go\nignore B on Go }"
+        text = "module m\nM : {A, B} init A final {B}\nM.Go {\nM = A => M' = B\nM = B => ignore\n}"
         self.assertEqual(blocking_kinds(text), Counter({"OWNERLESS": 1}))
 
     def test_uncovered_combination(self):
-        text = "module m\nactor X\naction Do\nentity R"
+        text = "module m\nactor X\naction Do\nR {}"
         self.assertEqual(blocking_kinds(text), Counter({"UNCOVERED": 1}))
 
     def test_wildcard_covers_every_combination(self):
-        text = "module m\nactor X, Y\naction Do\nentity R\npermit * Do R"
+        text = "module m\nactor X, Y\naction Do\nR {}\npermit * Do R"
         self.assertEqual(blocking_kinds(text), Counter())
 
     def test_contradiction_between_wildcard_and_specific_rule(self):
-        text = "module m\nactor X\naction Do\nentity R\npermit * Do R\nforbid X Do R"
+        text = "module m\nactor X\naction Do\nR {}\npermit * Do R\nforbid X Do R"
         self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
 
-    def test_exclusion_resolves_a_conditional_contradiction(self):
-        base = (
-            "module m\nenum S = On | Off\nenum P = Open | Closed\nactor X\naction Do\nentity R\n"
-            "forbid * Do R when S = Off\npermit X Do R when P = Open\n"
-            "forbid * Do R when S = On and P = Closed\n"
-        )
-        self.assertEqual(blocking_kinds(base), Counter({"CONTRADICTION": 1}))
-        resolved = base + "exclusive S=Off, P=Open\n"
+    def test_assumption_resolves_a_conditional_contradiction(self):
+        self.assertEqual(blocking_kinds(CONFLICTING_RULES), Counter({"CONTRADICTION": 1}))
+        resolved = CONFLICTING_RULES + "assume apart: !(S = Off & P = Open)\n"
         self.assertEqual(blocking_kinds(resolved), Counter())
 
     def test_structure_unknown_blocks_and_value_unknown_does_not(self):
@@ -228,24 +225,24 @@ class SeededHoleTest(unittest.TestCase):
 
     def test_time_unit_mismatch(self):
         text = (
-            "module m\nentity E passive { submitted_on: Day\nsettled_in: Month }\n"
+            "module m\nE passive { submitted_on: Day\nsettled_in: Month }\n"
             "law l: E.submitted_on = E.settled_in"
         )
         self.assertEqual(blocking_kinds(text), Counter({"UNIT_MISMATCH": 1}))
 
     def test_month_of_converts_a_day_to_a_month(self):
         text = (
-            "module m\nentity E passive { submitted_on: Day\nsettled_in: Month }\n"
+            "module m\nE passive { submitted_on: Day\nsettled_in: Month }\n"
             "law l: month_of(E.submitted_on) < E.settled_in"
         )
         self.assertEqual(blocking_kinds(text), Counter())
 
     def test_action_scope_limits_the_required_combinations(self):
-        text = "module m\nactor X, Y\naction Do by (X) on (R)\nentity R\npermit X Do R"
+        text = "module m\nactor X, Y\naction Do by (X) on (R)\nR {}\npermit X Do R"
         self.assertEqual(blocking_kinds(text), Counter())
 
     def test_rule_outside_the_action_scope_is_inapplicable(self):
-        text = "module m\nactor X, Y\naction Do by (X) on (R)\nentity R\npermit X Do R\npermit Y Do R"
+        text = "module m\nactor X, Y\naction Do by (X) on (R)\nR {}\npermit X Do R\npermit Y Do R"
         self.assertEqual(blocking_kinds(text), Counter({"INAPPLICABLE": 1}))
 
     def test_action_scope_with_undefined_names(self):
@@ -253,7 +250,7 @@ class SeededHoleTest(unittest.TestCase):
         self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 2}))
 
     def test_term_name_cannot_repeat_an_action_name(self):
-        text = "module m\nterm Do why \"x\"\naction Do"
+        text = "module m\nterm Do\naction Do\ntext { Do why \"x\" }"
         self.assertEqual(blocking_kinds(text), Counter({"DUPLICATE": 1}))
 
     def test_derived_status_and_screen_pass_when_linked(self):
@@ -261,7 +258,7 @@ class SeededHoleTest(unittest.TestCase):
         self.assertEqual(blocking_kinds(text), Counter())
 
     def test_derived_status_needs_rows_that_link_the_entity_to_the_enum(self):
-        text = "module m\nenum S = A | B\nentity Parent\nderive D of Parent from S mixed Mixed"
+        text = "module m\nS : {A, B}\nParent {}\nderive D of Parent from S mixed Mixed"
         self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 1}))
 
     def test_mixed_value_cannot_repeat_an_enum_value(self):
@@ -273,36 +270,26 @@ class SeededHoleTest(unittest.TestCase):
         self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 2}))
 
     def test_invariant_removes_the_worlds_that_cause_a_contradiction(self):
-        base = (
-            "module m\nenum S = On | Off\nenum P = Open | Closed\nactor X\naction Do\nentity R\n"
-            "forbid * Do R when S = Off\npermit X Do R when P = Open\n"
-            "forbid * Do R when S = On and P = Closed\n"
-        )
-        self.assertEqual(blocking_kinds(base), Counter({"CONTRADICTION": 1}))
-        ascii_form = base + "invariant I: S = Off => P != Open\n"
-        unicode_form = base + "invariant I: S = Off ⇒ P ≠ Open\n"
+        self.assertEqual(blocking_kinds(CONFLICTING_RULES), Counter({"CONTRADICTION": 1}))
+        ascii_form = CONFLICTING_RULES + "inv I: S = Off => P != Open\n"
+        unicode_form = CONFLICTING_RULES + "inv I: S = Off ⇒ P ≠ Open\n"
         self.assertEqual(blocking_kinds(ascii_form), Counter())
         self.assertEqual(blocking_kinds(unicode_form), Counter())
 
     def test_quantifier_ranges_over_the_values_of_an_enum(self):
-        base = (
-            "module m\nenum S = On | Off\nenum P = Open | Closed\nactor X\naction Do\nentity R\n"
-            "forbid * Do R when S = Off\npermit X Do R when P = Open\n"
-            "forbid * Do R when S = On and P = Closed\n"
-        )
-        text = base + "invariant I: ∀ s ∈ S : s = Off ⇒ P ∈ {Closed}\n"
+        text = CONFLICTING_RULES + "inv I: ∀ s ∈ S : s = Off ⇒ P ∈ {Closed}\n"
         self.assertEqual(blocking_kinds(text), Counter())
 
     def test_invariant_with_undefined_names_is_reported(self):
-        text = "module m\nenum S = On | Off\ninvariant I: S = Maybe\ninvariant J: Nothing = On\ninvariant K: T ∈ {On}"
+        text = "module m\nS : {On, Off}\ninv I: S = Maybe\ninv J: Nothing = On\ninv K: T ∈ {On}"
         self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 3}))
 
     def test_invariants_that_exclude_every_combination_contradict(self):
-        text = "module m\nenum S = On | Off\ninvariant A: S = On\ninvariant B: S = Off"
+        text = "module m\nS : {On, Off}\ninv A: S = On\ninv B: S = Off"
         self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
 
     def test_invariant_is_rendered_with_symbols(self):
-        text = "module m\nenum S = On | Off\nenum P = Open | Closed\ninvariant I: ∀ s ∈ S : (s = Off ∧ P = Open) ⇒ ¬(P = Closed) why \"x\""
+        text = "module m\nS : {On, Off}\nP : {Open, Closed}\ninv I: ∀ s ∈ S : (s = Off ∧ P = Open) ⇒ ¬(P = Closed)\ntext { I why \"x\" }"
         module = parse_module(text)
         document = render(module, check(module))
         self.assertIn("- x\n", document)
@@ -310,7 +297,7 @@ class SeededHoleTest(unittest.TestCase):
 
     def test_syntax_error_reports_the_line(self):
         with self.assertRaises(PdlSyntaxError) as raised:
-            parse_module("module m\nenum E A")
+            parse_module("module m\nE : A")
         self.assertEqual(raised.exception.line, 2)
 
 
@@ -320,105 +307,102 @@ class MachineTest(unittest.TestCase):
 
     def test_unreachable_trap_and_unhandled_states(self):
         text = (
-            "module m\nexternal Ext\nmachine M { states A, B, C, D\ninitial A\nterminal B\n"
-            "event Go\nA -> B on Go by Ext\nC -> D on Go by Ext\nignore B on Go\nignore D on Go }"
+            "module m\nexternal Ext\nM : {A, B, C, D} init A final {B}\n"
+            "M.Go @Ext {\nM = A => M' = B\nM = C => M' = D\nM = B => ignore\nM = D => ignore\n}"
         )
         self.assertEqual(blocking_kinds(text), Counter({"UNREACHABLE": 2, "TRAP": 2}))
 
     def test_unhandled_event_in_a_state(self):
         text = (
-            "module m\nexternal Ext\nmachine M { states A, B\ninitial A\nterminal B\n"
-            "event Go, Stop\nA -> B on Go by Ext\nignore B on Go }"
+            "module m\nexternal Ext\nM : {A, B} init A final {B}\n"
+            "M.Go @Ext {\nM = A => M' = B\nM = B => ignore\n}\nM.Stop {\n}"
         )
         self.assertEqual(blocking_kinds(text), Counter({"UNHANDLED": 2}))
 
     def test_two_targets_for_the_same_event_contradict(self):
         text = (
-            "module m\nexternal Ext\nmachine M { states A, B, C\ninitial A\nterminal B, C\n"
-            "event Go\nA -> B on Go by Ext\nA -> C on Go by Ext\nignore B on Go\nignore C on Go }"
+            "module m\nexternal Ext\nM : {A, B, C} init A final {B, C}\n"
+            "M.Go @Ext {\nM = A => M' = B\nM = A => M' = C\nM = B => ignore\nM = C => ignore\n}"
         )
         self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
 
     def test_scenario_that_ends_elsewhere_fails(self):
-        text = COVERED_MACHINE.replace("expect B", "expect A")
+        text = COVERED_MACHINE.replace("Go, Go -> M = B", "Go, Go -> M = A")
         self.assertEqual(blocking_kinds(text), Counter({"SCENARIO_FAILED": 1}))
 
     def test_scenario_through_a_missing_transition_fails(self):
-        text = COVERED_MACHINE.replace("events Go, Go", "events Go, Go, Go").replace("ignore B on Go", "reject B on Go")
+        text = COVERED_MACHINE.replace("Go, Go -> M = B", "Go, Go, Go -> M = B").replace("M = B => ignore", "M = B => reject")
         self.assertEqual(blocking_kinds(text), Counter({"SCENARIO_FAILED": 1}))
 
 
 GUARDED = (
-    "module m\nenum G = On | Off\nexternal Ext, Other\n"
-    "machine M { states A, B, C\ninitial A\nterminal B, C\nevent Go\n"
-    "A -> B on Go when G = On by Ext\n"
-    "A -> C on Go when G = Off by Ext\n"
-    "ignore B on Go\nignore C on Go }\n"
+    "module m\nG : {On, Off}\nexternal Ext, Other\n"
+    "M : {A, B, C} init A final {B, C}\nM.Go @Ext {\n"
+    "M = A & G = On => M' = B\n"
+    "M = A & G = Off => M' = C\n"
+    "M = B => ignore\nM = C => ignore\n}\n"
 )
 
 
 class ExtensionTest(unittest.TestCase):
     def test_value_sets_and_negation_in_rule_conditions(self):
-        base = "module m\nenum S = A | B | C\nactor X\naction Do\nentity R\n"
-        covered = base + "permit X Do R when S in {A, B}\nforbid X Do R when S != A and S != B\n"
+        base = "module m\nS : {A, B, C}\nactor X\naction Do\nR {}\n"
+        covered = base + "permit X Do R: S in {A, B}\nforbid X Do R: S != A & S != B\n"
         self.assertEqual(blocking_kinds(covered), Counter())
-        overlapping = base + "permit X Do R when S in {A, B}\nforbid X Do R when S != A\n"
+        overlapping = base + "permit X Do R: S in {A, B}\nforbid X Do R: S != A\n"
         self.assertEqual(blocking_kinds(overlapping), Counter({"CONTRADICTION": 1}))
 
     def test_condition_values_must_belong_to_the_enum(self):
-        text = "module m\nenum S = A | B\nactor X\naction Do\nentity R\npermit X Do R when S in {A, Z}"
+        text = "module m\nS : {A, B}\nactor X\naction Do\nR {}\npermit X Do R: S in {A, Z}"
         self.assertIn("UNDEFINED", blocking_kinds(text))
 
     def test_guards_that_cover_every_case_pass(self):
         self.assertEqual(blocking_kinds(GUARDED), Counter())
 
     def test_a_missing_guard_branch_is_reported(self):
-        text = GUARDED.replace("A -> C on Go when G = Off by Ext\n", "")
+        text = GUARDED.replace("M = A & G = Off => M' = C\n", "")
         self.assertEqual(blocking_kinds(text), Counter({"UNCOVERED": 1, "UNREACHABLE": 1}))
 
     def test_overlapping_guards_with_different_targets_contradict(self):
-        text = GUARDED.replace("when G = Off", "when G in {On, Off}")
+        text = GUARDED.replace("G = Off =>", "G in {On, Off} =>")
         self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
 
     def test_an_explicit_handling_covers_the_other_guard_branch(self):
-        text = GUARDED.replace("A -> C on Go when G = Off by Ext\n", "ignore A on Go\n")
+        text = GUARDED.replace("M = A & G = Off => M' = C\n", "M = A => ignore\n")
         self.assertEqual(blocking_kinds(text), Counter({"UNREACHABLE": 1}))
 
     def test_scenario_uses_the_given_values_to_pick_a_guard(self):
-        passing = GUARDED + "scenario s on M { start A given G = Off events Go expect C }\n"
+        passing = GUARDED + "run s: M = A & G = Off -> Go -> M = C\n"
         self.assertEqual(blocking_kinds(passing), Counter())
-        failing = GUARDED + "scenario s on M { start A given G = Off events Go expect B }\n"
+        failing = GUARDED + "run s: M = A & G = Off -> Go -> M = B\n"
         self.assertEqual(blocking_kinds(failing), Counter({"SCENARIO_FAILED": 1}))
 
     def test_cyclic_machine_needs_no_terminal_state(self):
-        text = (
-            "module m\nexternal Ext\nmachine M { cyclic\nstates A, B\ninitial A\nevent Go\n"
-            "A -> B on Go by Ext\nB -> A on Go by Ext }"
-        )
+        text = "module m\nexternal Ext\nM : {A, B} init A cyclic\nM.Go @Ext {\nM = A => M' = B\nM = B => M' = A\n}"
         self.assertEqual(blocking_kinds(text), Counter())
 
     def test_cyclic_machine_reports_a_state_that_cannot_return(self):
         text = (
-            "module m\nexternal Ext\nmachine M { cyclic\nstates A, B, C\ninitial A\nevent Go\n"
-            "A -> B on Go by Ext\nB -> A on Go by Ext\nreject C on Go }"
+            "module m\nexternal Ext\nM : {A, B, C} init A cyclic\n"
+            "M.Go @Ext {\nM = A => M' = B\nM = B => M' = A\nM = C => reject\n}"
         )
         counts = blocking_kinds(text)
         self.assertEqual(counts["TRAP"], 1)
         self.assertEqual(counts["UNREACHABLE"], 1)
 
     def test_machine_without_terminal_and_not_cyclic_is_reported(self):
-        text = "module m\nexternal Ext\nmachine M { states A\ninitial A\nevent Go\nignore A on Go }"
+        text = "module m\nexternal Ext\nM : {A} init A\nM.Go {\nM = A => ignore\n}"
         self.assertEqual(blocking_kinds(text), Counter({"MISSING": 1}))
 
     def test_a_transition_can_name_several_actors(self):
-        ok = GUARDED.replace("when G = On by Ext", "when G = On by Ext, Other")
+        ok = GUARDED.replace("G = On => M' = B", "G = On => M' = B @Ext, Other")
         self.assertEqual(blocking_kinds(ok), Counter())
-        bad = GUARDED.replace("when G = On by Ext", "when G = On by Ext, Nobody")
+        bad = GUARDED.replace("G = On => M' = B", "G = On => M' = B @Ext, Nobody")
         self.assertEqual(blocking_kinds(bad), Counter({"UNDEFINED": 1}))
 
     def test_several_assumptions_on_one_line(self):
         unknowns = 'unknown value a { provisional "1" source "s" verified no }\nunknown value b { provisional "2" source "s" verified no }\n'
-        base = "module m\nactor X\naction Do\nentity R\n" + unknowns
+        base = "module m\nactor X\naction Do\nR {}\n" + unknowns
         ok = base + "permit X Do R assuming a, b\n"
         kinds = [f.kind for f in check(parse_module(ok))]
         self.assertNotIn("UNREFERENCED", kinds)
@@ -433,9 +417,9 @@ class ExtensionTest(unittest.TestCase):
         self.assertFalse(any(f.blocking for f in findings))
 
     def test_handling_can_carry_an_assumption_and_a_rationale(self):
-        text = GUARDED.replace(
-            "ignore B on Go\n", 'ignore B on Go assuming a why "b"\n'
-        ) + 'unknown value a { provisional "1" source "s" verified no }\n'
+        text = GUARDED.replace("M = B => ignore\n", "M = B => ignore assuming a as waits\n") + (
+            'unknown value a { provisional "1" source "s" verified no }\ntext { M.Go.waits why "b" }\n'
+        )
         module = parse_module(text)
         self.assertEqual(blocking_kinds(text), Counter())
         document = render(module, check(module))
@@ -443,17 +427,17 @@ class ExtensionTest(unittest.TestCase):
         self.assertIn("  - 근거: b", document)
 
     def test_nullable_and_list_field_types(self):
-        ok = "module m\nenum S = A | B\nentity E passive { a: Text?\nb: list S\nc: Decimal\nd: Money?\ne: Duration }"
+        ok = "module m\nS : {A, B}\nE passive { a: Text?\nb: list S\nc: Decimal\nd: Money?\ne: Duration }"
         self.assertEqual(blocking_kinds(ok), Counter())
-        bad = "module m\nentity E passive { a: list Nowhere }"
+        bad = "module m\nE passive { a: list Nowhere }"
         self.assertEqual(blocking_kinds(bad), Counter({"UNDEFINED": 1}))
 
     def test_nullable_time_field_still_works_in_a_law(self):
-        text = "module m\nentity E passive { a: Month?\nb: Month }\nlaw l: E.b = next(E.a)"
+        text = "module m\nE passive { a: Month?\nb: Month }\nlaw l: E.b = next(E.a)"
         self.assertEqual(blocking_kinds(text), Counter())
 
     def test_guard_condition_is_rendered_in_the_flow(self):
-        text = GUARDED.replace('enum G = On | Off', 'enum G label "스위치" = On "켜짐" | Off "꺼짐"')
+        text = GUARDED + 'text {\nG "스위치"\nG.On "켜짐"\nG.Off "꺼짐"\n}\n'
         module = parse_module(text)
         document = render(module, check(module))
         self.assertIn("'A' 상태에서 스위치가 '켜짐'일 때 'Go'가 일어나면 'B' 상태가 된다.", document)
@@ -467,7 +451,7 @@ class ExtensionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = TempPath(directory)
             source = root / "small_library.pdl"
-            source.write_text(modern(UNCOVERED_LIBRARY), encoding="utf-8")
+            source.write_text(UNCOVERED_LIBRARY, encoding="utf-8")
             output = root / "build"
             self.assertFalse(build_file(source, output, "ko"))
             self.assertFalse(output.exists())
@@ -486,43 +470,40 @@ class ExtensionTest(unittest.TestCase):
             root = TempPath(directory)
             for number, text in enumerate((LIBRARY, UNCOVERED_LIBRARY, GUARDED_IGNORE, COUNTER_MACHINE, CROSS_MACHINES)):
                 source = root / f"module{number}.pdl"
-                source.write_text(modern(text), encoding="utf-8")
+                source.write_text(text, encoding="utf-8")
                 build_file(source, root / "build", "ko", draft=True)
 
 
 COUNTER_MACHINE = (
     "module m\nexternal Ext\n"
-    "machine M { counter Streak max 2\nstates A, B\ninitial A\nterminal B\nevent Loss, Win\n"
-    "A -> A on Loss when Streak in {0, 1} then Streak + 1 by Ext\n"
-    "A -> B on Loss when Streak = 2 by Ext\n"
-    "A -> A on Win then Streak = 0 by Ext\n"
-    "ignore B on Loss\nignore B on Win }\n"
-    "scenario three_losses on M { start A events Loss, Loss, Loss expect B }\n"
+    "M : {A, B} init A final {B}\nM.Streak : 0..2\n"
+    "M.Loss @Ext {\nM = A & Streak in {0, 1} => Streak' = Streak + 1\nM = A & Streak = 2 => M' = B\nM = B => ignore\n}\n"
+    "M.Win @Ext {\nM = A => Streak' = 0\nM = B => ignore\n}\n"
+    "run three_losses: M = A -> Loss, Loss, Loss -> M = B\n"
 )
 
 CROSS_MACHINES = (
     "module m\nexternal Ext\n"
-    "machine P { states Ok, Bad\ninitial Ok\nterminal Bad\nevent Fail\nOk -> Bad on Fail by Ext\nignore Bad on Fail }\n"
-    "machine T { states Open, Done\ninitial Open\nterminal Done\nevent Finish\n"
-    "Open -> Done on Finish by Ext\nignore Done on Finish }\n"
-    "invariant done_needs_ok: T = Done => P = Ok\n"
+    "P : {Ok, Bad} init Ok final {Bad}\nP.Fail @Ext {\nP = Ok => P' = Bad\nP = Bad => ignore\n}\n"
+    "T : {Open, Done} init Open final {Done}\nT.Finish @Ext {\nT = Open => T' = Done\nT = Done => ignore\n}\n"
+    "inv done_needs_ok: T = Done => P = Ok\n"
 )
 
 
 class CapabilityTest(unittest.TestCase):
     def test_stored_texts_must_be_unique_within_an_enum(self):
-        ok = 'module m\nenum A = X "엑스" stored "엑스값" | Y stored "와이값"'
+        ok = 'module m\nA : {X, Y}\ntext {\nA.X "엑스" stored "엑스값"\nA.Y stored "와이값"\n}'
         self.assertEqual(blocking_kinds(ok), Counter())
-        clash = 'module m\nenum A = X stored "같은값" | Y stored "같은값"'
+        clash = 'module m\nA : {X, Y}\ntext {\nA.X stored "같은값"\nA.Y stored "같은값"\n}'
         self.assertEqual(blocking_kinds(clash), Counter({"DUPLICATE": 1}))
 
     def test_stored_text_is_shown_next_to_the_value(self):
-        module = parse_module('module m\nenum A = X "엑스" stored "엑스값" | Y')
+        module = parse_module('module m\nA : {X, Y}\ntext { A.X "엑스" stored "엑스값" }')
         document = render(module, check(module))
         self.assertIn("X (엑스) [저장값: 엑스값], Y", document)
 
     def test_a_repeated_enum_value_is_reported(self):
-        self.assertEqual(blocking_kinds("module m\nenum A = X | X"), Counter({"DUPLICATE": 1}))
+        self.assertEqual(blocking_kinds("module m\nA : {X, X}"), Counter({"DUPLICATE": 1}))
 
     def test_import_brings_in_shared_definitions(self):
         import tempfile
@@ -530,8 +511,8 @@ class CapabilityTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = TempPath(directory)
-            (root / "common.pdl").write_text("module common\nenum S = On | Off\nactor X\n", encoding="utf-8")
-            text = 'module m\nimport "common.pdl"\naction Do\nentity R\nforbid X Do R when S = Off\npermit X Do R when S = On\n'
+            (root / "common.pdl").write_text("module common\nS : {On, Off}\nactor X\n", encoding="utf-8")
+            text = 'module m\nimport "common.pdl"\naction Do\nR {}\nforbid X Do R: S = Off\npermit X Do R: S = On\n'
             module = parse_module(text, root / "main.pdl")
             self.assertEqual([f for f in check(module) if f.blocking], [])
 
@@ -541,7 +522,7 @@ class CapabilityTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = TempPath(directory)
-            (root / "d.pdl").write_text("module d\nenum S = On | Off\n", encoding="utf-8")
+            (root / "d.pdl").write_text("module d\nS : {On, Off}\n", encoding="utf-8")
             (root / "b.pdl").write_text('module b\nimport "d.pdl"\n', encoding="utf-8")
             (root / "c.pdl").write_text('module c\nimport "d.pdl"\n', encoding="utf-8")
             module = parse_module('module a\nimport "b.pdl"\nimport "c.pdl"\n', root / "a.pdl")
@@ -569,32 +550,29 @@ class CapabilityTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = TempPath(directory)
-            (root / "common.pdl").write_text("module common\nenum S = On | Off\n", encoding="utf-8")
-            module = parse_module('module m\nimport "common.pdl"\nenum S = A | B\n', root / "m.pdl")
+            (root / "common.pdl").write_text("module common\nS : {On, Off}\n", encoding="utf-8")
+            module = parse_module('module m\nimport "common.pdl"\nS : {A, B}\n', root / "m.pdl")
             self.assertEqual(Counter(f.kind for f in check(module) if f.blocking), Counter({"DUPLICATE": 1}))
 
     def test_a_counter_with_matching_guards_passes_and_the_scenario_counts(self):
         self.assertEqual(blocking_kinds(COUNTER_MACHINE), Counter())
 
     def test_a_counter_guard_gap_is_reported(self):
-        text = COUNTER_MACHINE.replace("A -> B on Loss when Streak = 2 by Ext\n", "A -> B on Loss when Streak = 1 by Ext\n")
+        text = COUNTER_MACHINE.replace("Streak = 2 => M' = B", "Streak = 1 => M' = B")
         counts = blocking_kinds(text)
         self.assertEqual(counts["UNCOVERED"], 1)
         self.assertEqual(counts["CONTRADICTION"], 1)
 
     def test_a_counter_that_can_exceed_its_maximum_is_reported(self):
-        text = (
-            "module m\nexternal Ext\nmachine M { counter C max 1\nstates A\ninitial A\nterminal A\nevent Go\n"
-            "A -> A on Go then C + 1 by Ext }"
-        )
+        text = "module m\nexternal Ext\nM : {A} init A final {A}\nM.C : 0..1\nM.Go @Ext {\nM = A => C' = C + 1\n}"
         self.assertEqual(blocking_kinds(text), Counter({"OVERFLOW": 1}))
 
     def test_effects_must_name_a_counter_and_stay_in_range(self):
-        text = COUNTER_MACHINE.replace("then Streak = 0", "then Missing = 0").replace("Streak + 1", "Streak = 9")
+        text = COUNTER_MACHINE.replace("Streak' = 0", "Missing' = 0").replace("Streak' = Streak + 1", "Streak' = 9")
         self.assertEqual(blocking_kinds(text)["UNDEFINED"], 2)
 
     def test_counter_and_time_limit_are_rendered(self):
-        text = COUNTER_MACHINE.replace("A -> A on Win then Streak = 0 by Ext", 'A -> A on Win then Streak = 0 by Ext after "60초"')
+        text = COUNTER_MACHINE.replace("Streak' = 0", "Streak' = 0 as reset") + 'text { M.Win.reset after "60초" }\n'
         module = parse_module(text)
         document = render(module, check(module))
         self.assertIn("- 카운터: Streak (0 ~ 2)", document)
@@ -609,16 +587,16 @@ class CapabilityTest(unittest.TestCase):
 
     def test_a_guard_on_another_machine_keeps_the_invariant(self):
         text = CROSS_MACHINES.replace(
-            "Open -> Done on Finish by Ext", "Open -> Done on Finish when P = Ok by Ext\nignore Open on Finish"
-        ).replace("Ok -> Bad on Fail by Ext\nignore Bad", "Ok -> Bad on Fail when T = Open by Ext\nignore Ok on Fail\nignore Bad")
+            "T = Open => T' = Done\n", "T = Open & P = Ok => T' = Done\nT = Open => ignore\n"
+        ).replace("P = Ok => P' = Bad\n", "P = Ok & T = Open => P' = Bad\nP = Ok => ignore\n")
         self.assertEqual(blocking_kinds(text), Counter({"TRAP": 2}))
 
     def test_a_state_that_a_guard_makes_unreachable_is_reported(self):
         text = (
             "module m\nexternal Ext\n"
-            "machine P { states Ok, Bad\ninitial Ok\nterminal Bad\nevent Fail\nOk -> Ok on Fail by Ext\nignore Bad on Fail }\n"
-            "machine T { states Open, Done\ninitial Open\nterminal Done\nevent Finish\n"
-            "Open -> Done on Finish when P = Bad by Ext\nignore Open on Finish\nignore Done on Finish }\n"
+            "P : {Ok, Bad} init Ok final {Bad}\nP.Fail @Ext {\nP = Ok => P' = Ok\nP = Bad => ignore\n}\n"
+            "T : {Open, Done} init Open final {Done}\n"
+            "T.Finish @Ext {\nT = Open & P = Bad => T' = Done\nT = Open => ignore\nT = Done => ignore\n}\n"
         )
         counts = blocking_kinds(text)
         self.assertEqual(counts["UNREACHABLE"], 2)
@@ -626,11 +604,11 @@ class CapabilityTest(unittest.TestCase):
 
 
 GUARDED_IGNORE = (
-    "module m\nexternal Ext\nenum S = On | Off\n"
-    "machine M { states A, B\ninitial A\nterminal B\nevent E, F\n"
-    "A -> B on E when S = On by Ext\nignore A on E when S = Off\n"
-    "A -> B on F by Ext\nignore B on E\nignore B on F }\n"
-    "scenario skipped on M { start A given S = Off events E, F expect B }\n"
+    "module m\nexternal Ext\nS : {On, Off}\n"
+    "M : {A, B} init A final {B}\n"
+    "M.E @Ext {\nM = A & S = On => M' = B\nM = A & S = Off => ignore\nM = B => ignore\n}\n"
+    "M.F @Ext {\nM = A => M' = B\nM = B => ignore\n}\n"
+    "run skipped: M = A & S = Off -> E, F -> M = B\n"
 )
 
 
@@ -639,19 +617,19 @@ class GuardedHandlingTest(unittest.TestCase):
         self.assertEqual(blocking_kinds(GUARDED_IGNORE), Counter())
 
     def test_a_world_without_transition_or_handling_is_uncovered(self):
-        text = GUARDED_IGNORE.replace("enum S = On | Off", "enum S = On | Off | Hold")
+        text = GUARDED_IGNORE.replace("S : {On, Off}", "S : {On, Off, Hold}")
         self.assertEqual(blocking_kinds(text), Counter({"UNCOVERED": 1}))
 
     def test_a_guarded_ignore_that_overlaps_a_transition_is_a_contradiction(self):
-        text = GUARDED_IGNORE.replace("ignore A on E when S = Off", "ignore A on E when S in {On, Off}")
+        text = GUARDED_IGNORE.replace("S = Off => ignore", "S in {On, Off} => ignore")
         self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
 
     def test_a_guarded_ignore_beside_an_unconditional_transition_is_a_contradiction(self):
-        text = GUARDED_IGNORE.replace("A -> B on E when S = On by Ext", "A -> B on E by Ext")
+        text = GUARDED_IGNORE.replace("M = A & S = On => M' = B", "M = A => M' = B")
         self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
 
     def test_a_scenario_skips_an_event_only_in_the_guarded_world(self):
-        text = GUARDED_IGNORE.replace("enum S = On | Off", "enum S = On | Off | Hold").replace("given S = Off", "given S = Hold")
+        text = GUARDED_IGNORE.replace("S : {On, Off}", "S : {On, Off, Hold}").replace("M = A & S = Off ->", "M = A & S = Hold ->")
         self.assertEqual(blocking_kinds(text), Counter({"UNCOVERED": 1, "SCENARIO_FAILED": 1}))
 
     def test_the_guard_is_rendered_beside_the_handling(self):
@@ -661,49 +639,49 @@ class GuardedHandlingTest(unittest.TestCase):
 
 
 GUARDED_PAIR = CROSS_MACHINES.replace(
-    "Open -> Done on Finish by Ext", "Open -> Done on Finish when P = Ok by Ext\nignore Open on Finish"
-).replace("Ok -> Bad on Fail by Ext\nignore Bad", "Ok -> Bad on Fail when T = Open by Ext\nignore Ok on Fail\nignore Bad")
+    "T = Open => T' = Done\n", "T = Open & P = Ok => T' = Done\nT = Open => ignore\n"
+).replace("P = Ok => P' = Bad\n", "P = Ok & T = Open => P' = Bad\nP = Ok => ignore\n")
 
 
 class JointScenarioTest(unittest.TestCase):
-    def kinds(self, scenario: str) -> Counter:
-        return blocking_kinds(GUARDED_PAIR + scenario + "\n")
+    def kinds(self, run: str) -> Counter:
+        return blocking_kinds(GUARDED_PAIR + run + "\n")
 
     def test_events_on_two_machines_follow_each_others_guards(self):
-        self.assertEqual(self.kinds("scenario s together { start P = Ok, T = Open events P.Fail, T.Finish expect P = Bad, T = Open }"), Counter({"TRAP": 2}))
-        self.assertEqual(self.kinds("scenario s together { start P = Ok, T = Open events T.Finish, P.Fail expect P = Ok, T = Done }"), Counter({"TRAP": 2}))
+        self.assertEqual(self.kinds("run s: P = Ok & T = Open -> P.Fail, T.Finish -> P = Bad & T = Open"), Counter({"TRAP": 2}))
+        self.assertEqual(self.kinds("run s: P = Ok & T = Open -> T.Finish, P.Fail -> P = Ok & T = Done"), Counter({"TRAP": 2}))
 
     def test_a_wrong_end_state_fails_the_scenario(self):
-        text = "scenario s together { start P = Bad, T = Open events T.Finish expect P = Bad, T = Done }"
+        text = "run s: P = Bad & T = Open -> T.Finish -> P = Bad & T = Done"
         self.assertEqual(self.kinds(text), Counter({"TRAP": 2, "SCENARIO_FAILED": 1}))
 
     def test_unknown_machines_states_and_events_are_undefined(self):
-        self.assertEqual(self.kinds("scenario s together { start Q = Ok events Q.Fail expect Q = Ok }")["UNDEFINED"], 1)
-        self.assertEqual(self.kinds("scenario s together { start P = Ok events P.Nope expect P = Ok }")["UNDEFINED"], 1)
-        self.assertEqual(self.kinds("scenario s together { start P = Ok events T.Finish expect P = Ok }")["UNDEFINED"], 1)
+        self.assertEqual(self.kinds("run s: Q = Ok -> Q.Fail -> Q = Ok")["UNDEFINED"], 1)
+        self.assertEqual(self.kinds("run s: P = Ok -> P.Nope -> P = Ok")["UNDEFINED"], 1)
+        self.assertEqual(self.kinds("run s: P = Ok -> T.Finish -> P = Ok")["UNDEFINED"], 1)
 
     def test_the_joint_scenario_is_rendered(self):
-        module = parse_module(GUARDED_PAIR + "scenario s together { start P = Ok, T = Open events P.Fail expect P = Bad }\n")
+        module = parse_module(GUARDED_PAIR + "run s: P = Ok & T = Open -> P.Fail -> P = Bad\n")
         document = render(module, check(module), "en")
         self.assertIn("- Start: P = Ok, T = Open", document)
         self.assertIn("- Event sequence: P: Fail", document)
 
 
 FLAGGED = (
-    "module m\nexternal Ext\nenum Flag = On | Off\n"
-    "machine M { states A, B\ninitial A\nterminal B\nevent Go\n"
-    "A -> B on Go when Flag = On by Ext\nreject A on Go\nreject B on Go }\n"
+    "module m\nexternal Ext\nFlag : {On, Off}\n"
+    "M : {A, B} init A final {B}\n"
+    "M.Go @Ext {\nM = A & Flag = On => M' = B\nM = A => reject\nM = B => reject\n}\n"
 )
 
 
 class SystemSemanticsTest(unittest.TestCase):
     def test_findings_follow_the_declared_state_order(self):
         text = (
-            "module m\nexternal Ext\nenum Flag = On | Off\n"
-            "machine M { states S1, S2, S3, S4, S5, S6\ninitial S1\nterminal S6\nevent Go, Ping\n"
-            "S1 -> S2 on Go by Ext\nS2 -> S3 on Go by Ext\nS3 -> S4 on Go by Ext\n"
-            "S4 -> S5 on Go by Ext\nS5 -> S6 on Go by Ext\nreject S6 on Go\n"
-            "ignore * on Ping when Flag = On }\n"
+            "module m\nexternal Ext\nFlag : {On, Off}\n"
+            "M : {S1, S2, S3, S4, S5, S6} init S1 final {S6}\n"
+            "M.Go @Ext {\nM = S1 => M' = S2\nM = S2 => M' = S3\nM = S3 => M' = S4\n"
+            "M = S4 => M' = S5\nM = S5 => M' = S6\nM = S6 => reject\n}\n"
+            "M.Ping {\nFlag = On => ignore\n}\n"
         )
         states = [f.message.split()[0] for f in check(parse_module(text)) if f.kind == "UNCOVERED"]
         self.assertEqual(states, ["S1", "S2", "S3", "S4", "S5", "S6"])
@@ -711,22 +689,23 @@ class SystemSemanticsTest(unittest.TestCase):
     def test_transitions_that_change_a_counter_differently_contradict(self):
         machine = (
             "module m\nexternal Ext\n"
-            "machine M { counter N max 3\nstates A, B\ninitial A\nterminal B\nevent Go, Inc\n"
-            "%s\nA -> B on Go by Ext\nreject B on Go\nreject B on Inc }\n"
+            "M : {A, B} init A final {B}\nM.N : 0..3\n"
+            "M.Go @Ext {\nM = A => M' = B\nM = B => reject\n}\n"
+            "M.Inc @Ext {\n%s\nM = B => reject\n}\n"
         )
-        guarded = "A -> A on Inc when N = 0 then N + 1 by Ext\nA -> A on Inc when N = 0 then N + 3 by Ext\nreject A on Inc"
+        guarded = "M = A & N = 0 => N' = N + 1\nM = A & N = 0 => N' = N + 3\nM = A => reject"
         self.assertEqual(blocking_kinds(machine % guarded), Counter({"CONTRADICTION": 1}))
-        unguarded = "A -> A on Inc then N = 1 by Ext\nA -> A on Inc then N = 2 by Ext"
+        unguarded = "M = A => N' = 1\nM = A => N' = 2"
         self.assertEqual(blocking_kinds(machine % unguarded), Counter({"CONTRADICTION": 1}))
-        same = "A -> A on Inc then N = 1 by Ext\nA -> A on Inc then N = 1 by Ext"
+        same = "M = A => N' = 1\nM = A => N' = 1"
         self.assertEqual(blocking_kinds(machine % same), Counter())
 
     def test_a_state_that_a_guard_keeps_from_finishing_is_a_trap(self):
         text = (
             "module m\nexternal Ext\n"
-            "machine M { counter N max 1\nstates A, B, C\ninitial A\nterminal C\nevent Go, Skip\n"
-            "A -> B on Go by Ext\nA -> C on Skip by Ext\nB -> C on Go when N = 1 by Ext\n"
-            "reject B on Go\nreject B on Skip\nreject C on Go\nreject C on Skip }\n"
+            "M : {A, B, C} init A final {C}\nM.N : 0..1\n"
+            "M.Go @Ext {\nM = A => M' = B\nM = B & N = 1 => M' = C\nM = B => reject\nM = C => reject\n}\n"
+            "M.Skip @Ext {\nM = A => M' = C\nM = B => reject\nM = C => reject\n}\n"
         )
         findings = [f for f in check(parse_module(text)) if f.blocking]
         self.assertEqual([f.kind for f in findings], ["TRAP"])
@@ -734,53 +713,53 @@ class SystemSemanticsTest(unittest.TestCase):
         self.assertIn("after: M: Go", findings[0].message)
 
     def test_a_transition_must_keep_an_invariant_that_reads_an_enum(self):
-        findings = [f for f in check(parse_module(FLAGGED + "invariant i: Flag = On => M = A\n")) if f.blocking]
+        findings = [f for f in check(parse_module(FLAGGED + "inv i: Flag = On => M = A\n")) if f.blocking]
         self.assertEqual([f.kind for f in findings], ["INVARIANT_VIOLATED"])
         self.assertIn("after: M: Go (Flag=On, M=B)", findings[0].message)
 
     def test_a_guard_that_keeps_the_enum_invariant_passes(self):
-        self.assertEqual(blocking_kinds(FLAGGED + "invariant i: M = B => Flag = On\n"), Counter())
+        self.assertEqual(blocking_kinds(FLAGGED + "inv i: M = B => Flag = On\n"), Counter())
 
     def test_an_invariant_removes_the_enum_values_that_enable_a_transition(self):
-        counts = blocking_kinds(FLAGGED + "invariant i: M = A => Flag = Off\n")
+        counts = blocking_kinds(FLAGGED + "inv i: M = A => Flag = Off\n")
         self.assertEqual(counts["UNREACHABLE"], 1)
         self.assertEqual(counts["INVARIANT_VIOLATED"], 0)
 
     def test_invariants_that_no_enum_value_satisfies_at_the_start_are_reported(self):
-        text = FLAGGED + "invariant i: M = A => Flag = On\ninvariant j: M = A => Flag = Off\n"
+        text = FLAGGED + "inv i: M = A => Flag = On\ninv j: M = A => Flag = Off\n"
         messages = [f.message for f in check(parse_module(text)) if f.kind == "INVARIANT_VIOLATED"]
         self.assertEqual(len(messages), 1)
         self.assertIn("at the start", messages[0])
 
 
-FREE_PAIR = CROSS_MACHINES.replace("invariant done_needs_ok: T = Done => P = Ok\n", "")
+FREE_PAIR = CROSS_MACHINES.replace("inv done_needs_ok: T = Done => P = Ok\n", "")
 
 
 class FormulaTest(unittest.TestCase):
     def test_a_rule_condition_takes_a_full_formula(self):
-        base = "module m\nenum S = A | B | C\nactor X\naction Do\nentity R\n"
-        covered = base + "permit X Do R when S = A or S = B\nforbid X Do R when not (S = A or S = B)\n"
+        base = "module m\nS : {A, B, C}\nactor X\naction Do\nR {}\n"
+        covered = base + "permit X Do R: S = A | S = B\nforbid X Do R: !(S = A | S = B)\n"
         self.assertEqual(blocking_kinds(covered), Counter())
-        gap = base + "permit X Do R when S = A or S = B\n"
+        gap = base + "permit X Do R: S = A | S = B\n"
         self.assertEqual(blocking_kinds(gap), Counter({"UNCOVERED": 1}))
 
     def test_a_guard_takes_a_full_formula(self):
-        text = GUARDED.replace("enum G = On | Off", "enum G = On | Off | Hold").replace("when G = Off", "when G = Off or G = Hold")
+        text = GUARDED.replace("G : {On, Off}", "G : {On, Off, Hold}").replace("G = Off =>", "(G = Off | G = Hold) =>")
         self.assertEqual(blocking_kinds(text), Counter())
-        overlapping = text.replace("when G = On", "when not G = Off")
+        overlapping = text.replace("G = On =>", "!(G = Off) =>")
         self.assertEqual(blocking_kinds(overlapping), Counter({"CONTRADICTION": 1}))
 
     def test_a_formula_guard_is_rendered_as_a_formula(self):
-        module = parse_module(GUARDED.replace("when G = Off", "when G = Off or G = On => G = Off"))
+        module = parse_module(GUARDED.replace("G = Off =>", "(G = Off | G = On => G = Off) =>"))
         self.assertIn("when `G = Off ∨ G = On ⇒ G = Off` holds", render(module, check(module), "en"))
         self.assertIn("`G = Off ∨ G = On ⇒ G = Off` 조건이 성립할 때", render(module, check(module), "ko"))
 
     def test_a_scenario_is_replayed_in_every_given_world(self):
-        passing = GUARDED + "scenario s on M { start A given G = On or G = Off events Go, Go expect B }\n"
+        passing = GUARDED + "run s: M = A & (G = On | G = Off) -> Go, Go -> M = B\n"
         findings = [f for f in check(parse_module(passing)) if f.blocking]
         self.assertEqual([f.kind for f in findings], ["SCENARIO_FAILED"])
         self.assertIn("ends in C instead of B when G=Off", findings[0].message)
-        empty = GUARDED + "scenario s on M { start A given G = On and G = Off events Go expect B }\n"
+        empty = GUARDED + "run s: M = A & G = On & G = Off -> Go -> M = B\n"
         self.assertEqual(blocking_kinds(empty), Counter({"SCENARIO_FAILED": 1}))
 
 
@@ -790,8 +769,8 @@ class PremiseTest(unittest.TestCase):
         self.assertEqual(counts["INVARIANT_VIOLATED"], 0)
         self.assertEqual(counts["UNREACHABLE"], 1)
 
-    def test_an_exclusion_over_machine_states_removes_the_joint_state(self):
-        counts = blocking_kinds(FREE_PAIR + "exclusive T = Done, P = Bad\n")
+    def test_an_assumption_over_machine_states_removes_the_joint_state(self):
+        counts = blocking_kinds(FREE_PAIR + "assume apart: !(T = Done & P = Bad)\n")
         self.assertEqual(counts["INVARIANT_VIOLATED"], 0)
         self.assertEqual(counts["TRAP"], 2)
 
@@ -801,7 +780,7 @@ class PremiseTest(unittest.TestCase):
         self.assertIn("rule out the start", findings[0].message)
 
     def test_an_assumption_is_rendered_with_its_formula(self):
-        module = parse_module(FLAGGED + 'assume a: M = B => Flag = On why "The flag stays on."\n')
+        module = parse_module(FLAGGED + 'assume a: M = B => Flag = On\ntext { a why "The flag stays on." }\n')
         document = render(module, check(module), "en")
         self.assertIn("## Premises\n\n- The flag stays on.", document)
         self.assertIn("- a: `M = B ⇒ Flag = On`", document)
@@ -812,60 +791,60 @@ class AssertionTest(unittest.TestCase):
         return [f.message for f in check(parse_module(text)) if f.kind == "ASSERTION_FAILED"]
 
     def test_always_reports_the_path_to_a_failing_state(self):
-        failures = self.failures(FREE_PAIR + "assert a: always T = Done => P = Ok\n")
+        failures = self.failures(FREE_PAIR + "prop a: always T = Done => P = Ok\n")
         self.assertEqual(len(failures), 1)
         self.assertIn("assertion a fails after:", failures[0])
         self.assertIn("(P=Bad, T=Done)", failures[0])
 
     def test_always_passes_when_guards_keep_it(self):
-        self.assertEqual(self.failures(GUARDED_PAIR + "assert a: always T = Done => P = Ok\n"), [])
+        self.assertEqual(self.failures(GUARDED_PAIR + "prop a: always T = Done => P = Ok\n"), [])
 
     def test_always_reads_every_admissible_enum_value(self):
-        self.assertEqual(len(self.failures(FLAGGED + "assert a: always M = B => Flag = On\n")), 1)
-        kept = FLAGGED + "assume keep: M = B => Flag = On\nassert a: always M = B => Flag = On\n"
+        self.assertEqual(len(self.failures(FLAGGED + "prop a: always M = B => Flag = On\n")), 1)
+        kept = FLAGGED + "assume keep: M = B => Flag = On\nprop a: always M = B => Flag = On\n"
         self.assertEqual(self.failures(kept), [])
 
     def test_reachable_needs_one_state(self):
-        self.assertEqual(self.failures(FREE_PAIR + "assert r: reachable T = Done and P = Bad\n"), [])
-        failures = self.failures(GUARDED_PAIR + "assert r: reachable T = Done and P = Bad\n")
+        self.assertEqual(self.failures(FREE_PAIR + "prop r: reachable T = Done & P = Bad\n"), [])
+        failures = self.failures(GUARDED_PAIR + "prop r: reachable T = Done & P = Bad\n")
         self.assertEqual(failures, ["assertion r holds in no reachable state"])
 
     def test_can_reads_the_states_ahead(self):
-        failures = self.failures(GUARDED_PAIR + "assert live: always can T = Done\n")
+        failures = self.failures(GUARDED_PAIR + "prop live: always can T = Done\n")
         self.assertEqual(failures, ["assertion live fails after: P: Fail (P=Bad, T=Open)"])
-        self.assertEqual(self.failures(GUARDED_PAIR + "assert live: always P = Ok => can T = Done\n"), [])
+        self.assertEqual(self.failures(GUARDED_PAIR + "prop live: always P = Ok => can T = Done\n"), [])
 
     def test_an_assertion_needs_no_machine(self):
-        base = "module m\nenum S = A | B\nexclusive S = A, S = A\n"
-        self.assertEqual(self.failures(base + "assert a: always S = B\n"), [])
-        self.assertEqual(len(self.failures(base + "assert a: reachable S = A\n")), 1)
+        base = "module m\nS : {A, B}\nassume never_a: !(S = A)\n"
+        self.assertEqual(self.failures(base + "prop a: always S = B\n"), [])
+        self.assertEqual(len(self.failures(base + "prop a: reachable S = A\n")), 1)
 
     def test_an_assertion_names_defined_values(self):
-        self.assertEqual(blocking_kinds(FREE_PAIR + "assert a: always T = Gone\n")["UNDEFINED"], 1)
+        self.assertEqual(blocking_kinds(FREE_PAIR + "prop a: always T = Gone\n")["UNDEFINED"], 1)
 
     def test_can_and_the_mode_are_part_of_the_syntax(self):
         with self.assertRaises(PdlSyntaxError):
-            parse_module(FREE_PAIR + "invariant i: can T = Done\n")
+            parse_module(FREE_PAIR + "inv i: can T = Done\n")
         with self.assertRaises(PdlSyntaxError):
-            parse_module(FREE_PAIR + "assert a: T = Done\n")
+            parse_module(FREE_PAIR + "prop a: T = Done\n")
 
     def test_an_assertion_is_rendered_with_its_formula(self):
-        module = parse_module(GUARDED_PAIR + 'assert live: always P = Ok => can T = Done why "A good photo lets the task finish."\n')
+        module = parse_module(GUARDED_PAIR + 'prop live: always P = Ok => can T = Done\ntext { live why "A good photo lets the task finish." }\n')
         document = render(module, check(module), "en")
         self.assertIn("## Verified properties\n\n- A good photo lets the task finish.", document)
         self.assertIn("- live: `always P = Ok ⇒ can (T = Done)`", document)
 
 
 SHOP = (
-    "module m\nexternal Sys\nenum Grade = Gold | Basic\n"
-    "entity Dealer key (id) passive { id: Text\ngrade: Grade fixed }\n"
-    "entity Order key (id) passive { id: Text\ndealer: Dealer fixed\nbackup: Dealer? }\n"
+    "module m\nexternal Sys\nGrade : {Gold, Basic}\n"
+    "Dealer key (id) passive { id: Text\ngrade: Grade fixed }\n"
+    "Order key (id) passive { id: Text\ndealer: Dealer fixed\nbackup: Dealer? }\n"
     "scope Dealer 2\nscope Order 2\n"
-    "machine Flow of Order { states Open, Done\ninitial Open\nterminal Done\nevent Finish\n"
-    "Open -> Done on Finish when this.dealer.grade = Gold by Sys\n"
-    "reject Open on Finish\nreject Done on Finish }\n"
+    "Flow of Order : {Open, Done} init Open final {Done}\n"
+    "Flow.Finish @Sys {\nFlow = Open & this.dealer.grade = Gold => Flow' = Done\n"
+    "Flow = Open => reject\nFlow = Done => reject\n}\n"
 )
-GOLD_ONLY = "assume all_gold: forall d in Dealer: d.grade = Gold\n"
+GOLD_ONLY = "assume all_gold: all d in Dealer: d.grade = Gold\n"
 
 
 class RelationTest(unittest.TestCase):
@@ -873,7 +852,7 @@ class RelationTest(unittest.TestCase):
         return [f.message for f in check(parse_module(text)) if f.kind == "ASSERTION_FAILED"]
 
     def test_each_instance_runs_its_own_machine(self):
-        text = SHOP + GOLD_ONLY + "assert apart: reachable Order1.Flow = Done and Order2.Flow = Open\n"
+        text = SHOP + GOLD_ONLY + "prop apart: reachable Order1.Flow = Done & Order2.Flow = Open\n"
         self.assertEqual(blocking_kinds(text), Counter())
 
     def test_a_fixed_field_that_blocks_an_instance_is_a_trap(self):
@@ -883,67 +862,67 @@ class RelationTest(unittest.TestCase):
         self.assertIn("Dealer1.grade=Basic", findings[0].message)
 
     def test_a_path_reads_through_a_reference(self):
-        holds = SHOP + GOLD_ONLY + "assert a: always forall o in Order: o.Flow = Done => o.dealer.grade = Gold\n"
+        holds = SHOP + GOLD_ONLY + "prop a: always all o in Order: o.Flow = Done => o.dealer.grade = Gold\n"
         self.assertEqual(self.failures(holds), [])
-        fails = SHOP + GOLD_ONLY + "assert a: always forall o in Order: o.dealer = Dealer1\n"
+        fails = SHOP + GOLD_ONLY + "prop a: always all o in Order: o.dealer = Dealer1\n"
         self.assertEqual(len(self.failures(fails)), 1)
 
     def test_a_field_that_is_not_fixed_changes_between_transitions(self):
         text = SHOP.replace("grade: Grade fixed", "grade: Grade")
-        text += "assert a: always forall o in Order: o.Flow = Done => o.dealer.grade = Gold\n"
+        text += "prop a: always all o in Order: o.Flow = Done => o.dealer.grade = Gold\n"
         self.assertEqual(len(self.failures(text)), 1)
 
     def test_a_guard_reads_the_other_instances(self):
-        guard = "when this.dealer.grade = Gold"
-        alone = guard + " and forall p in Order: p = this or p.dealer != this.dealer or p.Flow = Open"
-        one = "assert one: always forall a in Order: forall b in Order: a = b or a.dealer != b.dealer or a.Flow = Open or b.Flow = Open\n"
+        guard = "Flow = Open & this.dealer.grade = Gold"
+        alone = guard + " & (all p in Order: p = this | p.dealer != this.dealer | p.Flow = Open)"
+        one = "prop one: always all a in Order: all b in Order: a = b | a.dealer != b.dealer | a.Flow = Open | b.Flow = Open\n"
         self.assertEqual(len(self.failures(SHOP + GOLD_ONLY + one)), 1)
         self.assertEqual(self.failures(SHOP.replace(guard, alone) + GOLD_ONLY + one), [])
 
     def test_exists_needs_one_instance(self):
-        text = SHOP + GOLD_ONLY + "assert some_open: always exists o in Order: o.Flow = Open\n"
+        text = SHOP + GOLD_ONLY + "prop some_open: always some o in Order: o.Flow = Open\n"
         failures = self.failures(text)
         self.assertEqual(len(failures), 1)
         self.assertIn("Order1.Flow=Done", failures[0])
         self.assertIn("Order2.Flow=Done", failures[0])
 
     def test_an_optional_field_can_be_missing(self):
-        text = SHOP + GOLD_ONLY + "assert a: reachable Order1.backup = none\nassert b: always Order1.backup.grade = Gold\n"
+        text = SHOP + GOLD_ONLY + "prop a: reachable Order1.backup = none\nprop b: always Order1.backup.grade = Gold\n"
         failures = self.failures(text)
         self.assertEqual(len(failures), 1)
         self.assertIn("assertion b", failures[0])
 
     def test_a_rule_reads_the_instance_it_applies_to(self):
-        base = SHOP.replace("passive { id: Text\ndealer", "{ id: Text\ndealer") + "actor Clerk\naction Edit\n"
-        covered = base + "permit Clerk Edit Order when this.Flow = Open\nforbid Clerk Edit Order when this.Flow = Done\n"
+        base = SHOP.replace("Order key (id) passive {", "Order key (id) {") + "actor Clerk\naction Edit\n"
+        covered = base + "permit Clerk Edit Order: this.Flow = Open\nforbid Clerk Edit Order: this.Flow = Done\n"
         self.assertEqual(blocking_kinds(covered + GOLD_ONLY), Counter())
-        gap = base + "permit Clerk Edit Order when this.Flow = Open\n"
+        gap = base + "permit Clerk Edit Order: this.Flow = Open\n"
         self.assertEqual(blocking_kinds(gap + GOLD_ONLY), Counter({"UNCOVERED": 1}))
 
     def test_a_scenario_replays_the_first_instance(self):
-        text = SHOP + GOLD_ONLY + "scenario s on Flow { start Open given this.dealer.grade = Gold events Finish expect Done }\n"
+        text = SHOP + GOLD_ONLY + "run s: Flow = Open & this.dealer.grade = Gold -> Finish -> Flow = Done\n"
         self.assertEqual(blocking_kinds(text), Counter())
 
     def test_relational_errors_are_reported(self):
         for formula, part in (
-            ("forall o in Order: o.missing = Gold", "no field, machine, or counter named missing"),
-            ("forall o in Order: o.id = Gold", "which a formula cannot read"),
-            ("forall o in Order: o.dealer = Gold", "Gold is not a value of"),
+            ("all o in Order: o.missing = Gold", "no field, machine, or counter named missing"),
+            ("all o in Order: o.id = Gold", "which a formula cannot read"),
+            ("all o in Order: o.dealer = Gold", "Gold is not a value of"),
             ("stranger.grade = Gold", "not a bound variable"),
-            ("forall o in Order: o.dealer.grade.more = Gold", "not an entity instance"),
+            ("all o in Order: o.dealer.grade.more = Gold", "not an entity instance"),
         ):
-            messages = [f.message for f in check(parse_module(SHOP + GOLD_ONLY + f"assert a: always {formula}\n")) if f.kind == "UNDEFINED"]
+            messages = [f.message for f in check(parse_module(SHOP + GOLD_ONLY + f"prop a: always {formula}\n")) if f.kind == "UNDEFINED"]
             self.assertEqual(len(messages), 1, formula)
             self.assertIn(part, messages[0])
 
     def test_a_scope_names_a_defined_entity_within_the_limit(self):
         self.assertEqual(blocking_kinds("module m\nscope Ghost 2\n"), Counter({"UNDEFINED": 1}))
-        self.assertEqual(blocking_kinds("module m\nentity E passive\nscope E 9\n"), Counter({"TOO_LARGE": 1}))
+        self.assertEqual(blocking_kinds("module m\nE passive {}\nscope E 9\n"), Counter({"TOO_LARGE": 1}))
         unscoped = SHOP.replace("scope Order 2\n", "")
         self.assertIn("UNDEFINED", blocking_kinds(unscoped))
 
     def test_the_instance_machine_and_the_quantifier_are_rendered(self):
-        module = parse_module(SHOP + GOLD_ONLY + "assert a: always exists o in Order: o.Flow = Open\n")
+        module = parse_module(SHOP + GOLD_ONLY + "prop a: always some o in Order: o.Flow = Open\n")
         document = render(module, check(module), "en")
         self.assertIn("- One flow for each: Order", document)
         self.assertIn("In Open when this.dealer.grade is Gold, Finish moves to Done.", document)
@@ -1166,10 +1145,10 @@ class LivenessTest(unittest.TestCase):
 
 
 LOGIN = (
-    "module m\nexternal Sys\nconst limit in 1..4\n"
-    "machine Login { states Active, Locked\ninitial Active\nterminal Locked\nevent Fail\ncounter Tries max limit\n"
-    "Active -> Active on Fail when Tries < limit then Tries + 1 by Sys\n"
-    "Active -> Locked on Fail when Tries = limit by Sys\nreject Locked on Fail }\n"
+    "module m\nexternal Sys\nconst limit : 1..4\n"
+    "Login : {Active, Locked} init Active final {Locked}\nLogin.Tries : 0..limit\n"
+    "Login.Fail @Sys {\nLogin = Active & Tries < limit => Tries' = Tries + 1\n"
+    "Login = Active & Tries = limit => Login' = Locked\nLogin = Locked => reject\n}\n"
 )
 
 
@@ -1178,33 +1157,33 @@ class ConstantTest(unittest.TestCase):
         return [f.message for f in check(parse_module(text)) if f.kind == "ASSERTION_FAILED"]
 
     def test_a_plan_is_checked_for_every_value_of_a_constant(self):
-        self.assertEqual(blocking_kinds(LOGIN + "assert a: always Login = Locked => Tries = limit\n"), Counter())
-        failures = self.failures(LOGIN + "assert a: always Tries >= 2 => Login = Locked\n")
+        self.assertEqual(blocking_kinds(LOGIN + "prop a: always Login = Locked => Tries = limit\n"), Counter())
+        failures = self.failures(LOGIN + "prop a: always Tries >= 2 => Login = Locked\n")
         self.assertEqual(failures, ["assertion a fails after: Login: Fail -> Login: Fail with limit=2 (Login=Active, Tries=2, limit=2)"])
 
     def test_a_guard_that_misses_a_value_of_the_constant_is_uncovered(self):
-        text = LOGIN.replace("when Tries = limit", "when Tries = 4")
+        text = LOGIN.replace("Tries = limit =>", "Tries = 4 =>")
         self.assertIn("UNCOVERED", blocking_kinds(text))
 
     def test_a_counter_cannot_pass_the_constant(self):
-        text = LOGIN.replace("when Tries < limit then", "when Tries <= limit then").replace("when Tries = limit", "when Tries > limit")
+        text = LOGIN.replace("Tries < limit =>", "Tries <= limit =>").replace("Tries = limit =>", "Tries > limit =>")
         self.assertEqual(blocking_kinds(text)["OVERFLOW"], 1)
 
     def test_a_scenario_gives_the_constant_a_value(self):
-        text = LOGIN + "scenario s on Login { start Active given limit = 2 events Fail, Fail, Fail expect Locked }\n"
+        text = LOGIN + "run s: Login = Active & limit = 2 -> Fail, Fail, Fail -> Login = Locked\n"
         self.assertEqual(blocking_kinds(text), Counter())
-        self.assertEqual(blocking_kinds(text.replace("given limit = 2", "given limit = 3")), Counter({"SCENARIO_FAILED": 1}))
+        self.assertEqual(blocking_kinds(text.replace("limit = 2", "limit = 3")), Counter({"SCENARIO_FAILED": 1}))
 
     def test_an_ordering_needs_numbers(self):
-        text = GUARDED.replace("when G = On", "when G < On")
+        text = GUARDED.replace("G = On =>", "G < On =>")
         self.assertIn("UNIT_MISMATCH", blocking_kinds(text))
 
     def test_a_counter_maximum_names_a_constant(self):
-        self.assertIn("UNDEFINED", blocking_kinds(LOGIN.replace("max limit", "max nothing")))
+        self.assertIn("UNDEFINED", blocking_kinds(LOGIN.replace("Tries : 0..limit", "Tries : 0..nothing")))
 
     def test_a_constant_carries_the_unknown_it_stands_for(self):
-        text = LOGIN.replace("const limit in 1..4", 'const limit in 1..4 label "잠금 횟수" assuming lock_limit')
-        text += 'unknown value lock_limit { label "잠금 횟수" source "회의록" provisional "3회" }\n'
+        text = LOGIN.replace("const limit : 1..4", "const limit : 1..4 assuming lock_limit")
+        text += 'unknown value lock_limit { label "잠금 횟수" source "회의록" provisional "3회" }\ntext { limit "잠금 횟수" }\n'
         module = parse_module(text)
         findings = check(module)
         self.assertEqual([f.kind for f in findings], ["UNVERIFIED"])
@@ -1220,20 +1199,20 @@ class SolverTest(unittest.TestCase):
     texts = [
         LIBRARY, UNCOVERED_LIBRARY, COVERED_MACHINE, GUARDED, COUNTER_MACHINE, CROSS_MACHINES, GUARDED_IGNORE,
         GUARDED_PAIR, FLAGGED, FREE_PAIR, SHOP, SHOP + GOLD_ONLY, LOGIN,
-        GUARDED.replace("when G = Off", "when G in {On, Off}"),
-        GUARDED.replace("A -> C on Go when G = Off by Ext\n", ""),
-        GUARDED_IGNORE.replace("ignore A on E when S = Off", "ignore A on E when S in {On, Off}"),
-        "module m\nenum S = A | B | C\nactor X\naction Do\nentity R\npermit X Do R when S in {A, B}\nforbid X Do R when S != A\n",
-        "module m\nenum S = A | B\nexclusive S = A, S = A\ninvariant i: S = A\n",
-        FREE_PAIR + "assert a: always T = Done => P = Ok\nassert r: reachable T = Done and P = Bad\n",
-        GUARDED_PAIR + "assert a: always T = Done => P = Ok\nassert r: reachable T = Done and P = Bad\n",
-        FLAGGED + "assert a: always M = B => Flag = On\nassert r: reachable M = B and Flag = Off\n",
-        SHOP + GOLD_ONLY + "assert a: always exists o in Order: o.Flow = Open\nassert b: always forall o in Order: o.dealer = Dealer1\n",
-        LOGIN + "assert a: always Tries >= 2 => Login = Locked\nassert b: always Login = Locked => Tries = limit\n",
+        GUARDED.replace("G = Off =>", "G in {On, Off} =>"),
+        GUARDED.replace("M = A & G = Off => M' = C\n", ""),
+        GUARDED_IGNORE.replace("S = Off => ignore", "S in {On, Off} => ignore"),
+        "module m\nS : {A, B, C}\nactor X\naction Do\nR {}\npermit X Do R: S in {A, B}\nforbid X Do R: S != A\n",
+        "module m\nS : {A, B}\nassume never_a: !(S = A)\ninv i: S = A\n",
+        FREE_PAIR + "prop a: always T = Done => P = Ok\nprop r: reachable T = Done & P = Bad\n",
+        GUARDED_PAIR + "prop a: always T = Done => P = Ok\nprop r: reachable T = Done & P = Bad\n",
+        FLAGGED + "prop a: always M = B => Flag = On\nprop r: reachable M = B & Flag = Off\n",
+        SHOP + GOLD_ONLY + "prop a: always some o in Order: o.Flow = Open\nprop b: always all o in Order: o.dealer = Dealer1\n",
+        LOGIN + "prop a: always Tries >= 2 => Login = Locked\nprop b: always Login = Locked => Tries = limit\n",
         "module m\nexternal Ext\n"
-        "machine P { states Ok, Bad\ninitial Ok\nterminal Bad\nevent Fail\nOk -> Ok on Fail by Ext\nignore Bad on Fail }\n"
-        "machine T { states Open, Done\ninitial Open\nterminal Done\nevent Finish\n"
-        "Open -> Done on Finish when P = Bad by Ext\nignore Open on Finish\nignore Done on Finish }\n",
+        "P : {Ok, Bad} init Ok final {Bad}\nP.Fail @Ext {\nP = Ok => P' = Ok\nP = Bad => ignore\n}\n"
+        "T : {Open, Done} init Open final {Done}\n"
+        "T.Finish @Ext {\nT = Open & P = Bad => T' = Done\nT = Open => ignore\nT = Done => ignore\n}\n",
     ]
 
     def test_the_solver_agrees_with_enumeration_on_worlds(self):
@@ -1263,19 +1242,19 @@ class SolverTest(unittest.TestCase):
             self.assertEqual(solved, listed, text[:60])
 
     def test_a_space_too_large_to_enumerate_is_solved(self):
-        enums = "".join(f"enum E{number} = A | B | C | D\n" for number in range(12))
-        every = " and ".join(f"E{number} = A" for number in range(12))
-        base = "module m\n" + enums + "actor X\naction Do\nentity R\n"
-        gap = [f for f in check(parse_module(base + f"permit X Do R when {every}\n")) if f.blocking]
+        enums = "".join(f"E{number} : {{A, B, C, D}}\n" for number in range(12))
+        every = " & ".join(f"E{number} = A" for number in range(12))
+        base = "module m\n" + enums + "actor X\naction Do\nR {}\n"
+        gap = [f for f in check(parse_module(base + f"permit X Do R: {every}\n")) if f.blocking]
         self.assertEqual([f.kind for f in gap], ["UNCOVERED"])
         self.assertIn("E0=A, E1=A, E10=A, E11=A, E2=A, E3=A, E4=A, E5=A, E6=A, E7=A, E8=A, E9=B", gap[0].message)
-        clash = base + f"permit X Do R when {every}\nforbid X Do R when E0 = A\nforbid X Do R when E0 != A\n"
+        clash = base + f"permit X Do R: {every}\nforbid X Do R: E0 = A\nforbid X Do R: E0 != A\n"
         self.assertEqual(blocking_kinds(clash), Counter({"CONTRADICTION": 1}))
-        covered = base + "permit X Do R when E0 = A\nforbid X Do R when E0 != A\n"
+        covered = base + "permit X Do R: E0 = A\nforbid X Do R: E0 != A\n"
         self.assertEqual(blocking_kinds(covered), Counter())
 
     def test_laws_that_cannot_hold_together_contradict(self):
-        base = "module m\nentity X { d: Day\ne: Day\nf: Day }\n"
+        base = "module m\nX { d: Day\ne: Day\nf: Day }\n"
         clash = base + "law a: X.d < X.e\nlaw free: X.f < next(X.f)\nlaw b: X.e < X.d\n"
         findings = [f for f in check(parse_module(clash)) if f.blocking]
         self.assertEqual([f.message for f in findings], ["the laws a, b cannot hold together"])
@@ -1341,11 +1320,6 @@ text {
     confirmed_is_paid why "확정된 예약은 결제가 끝난 예약이다."
 }
 """
-
-
-def document_lines(module) -> list[str]:
-    lines = render(module, check(module), "en").splitlines()
-    return sorted(line for line in lines if line and "exclusive" not in line and line != "## Premises")
 
 
 class SyntaxTest(unittest.TestCase):
@@ -1436,16 +1410,6 @@ class SyntaxTest(unittest.TestCase):
             self.assertEqual([f for f in check(module) if f.blocking], [])
             self.assertEqual(module.enums[0].label, "스위치")
 
-    def test_conversion_keeps_the_findings_and_the_document(self):
-        for text in SolverTest.texts:
-            before = legacy.parse_module(text)
-            after = syntax.parse_module(to_text(before, imports=False))
-            self.assertEqual(
-                Counter(f.kind for f in check(after)), Counter(f.kind for f in check(before)), text[:60]
-            )
-            self.assertEqual(document_lines(after), document_lines(before), text[:60])
-            self.assertEqual(to_text(after, imports=False), to_text(before, imports=False), text[:60])
-
     def test_a_computed_value_names_its_type_and_its_sources(self):
         base = (
             "module m\nBill passive { month: Month }\nLine passive { bill: Bill, amount: Money }\n"
@@ -1467,21 +1431,6 @@ class SyntaxTest(unittest.TestCase):
             messages = [f.message for f in check(syntax.parse_module(base + statement + "\n")) if f.kind == "UNDEFINED"]
             self.assertTrue(any(part in message for message in messages), statement)
         self.assertEqual(to_text(module), to_text(syntax.parse_module(to_text(module))))
-
-    def test_the_convert_command_rewrites_a_keyword_module(self):
-        import contextlib
-        import io
-        import tempfile
-
-        from pdl.cli import main
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "old.pdl").write_text(COVERED_MACHINE, encoding="utf-8")
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(main(["convert", str(root / "old.pdl"), "--output", str(root / "new")]), 0)
-                self.assertEqual(main(["build", str(root / "new" / "old.pdl"), "--output", str(root / "build")]), 0)
-            self.assertIn("M.Go @Ext {", (root / "new" / "old.pdl").read_text(encoding="utf-8"))
 
 
 class ReferenceTest(unittest.TestCase):
@@ -1511,32 +1460,32 @@ class ConsistencyTest(unittest.TestCase):
         return Counter((f.kind, f.blocking) for f in compare(modules))
 
     def test_modules_that_agree_or_list_other_slices_pass(self):
-        first = "module a\nentity Doc key (id) {\nid: Text\ntitle: Text\n}\nenum S = On | Off\n"
-        second = "module b\nentity Doc key (id) {\nid: Text\nauthor: Text\n}\nenum S = Off | On\n"
+        first = "module a\nDoc key (id) {\nid: Text\ntitle: Text\n}\nS : {On, Off}\n"
+        second = "module b\nDoc key (id) {\nid: Text\nauthor: Text\n}\nS : {Off, On}\n"
         self.assertEqual(self.kinds(first, second), Counter())
 
     def test_enum_values_that_differ_are_a_conflict(self):
         self.assertEqual(
-            self.kinds("module a\nenum S = On | Off\n", "module b\nenum S = On | Off | Hold\n"),
+            self.kinds("module a\nS : {On, Off}\n", "module b\nS : {On, Off, Hold}\n"),
             Counter({("INCONSISTENT", True): 1}),
         )
 
     def test_a_field_type_or_key_that_differs_is_a_conflict(self):
-        base = "module a\nentity Doc key (id) {\nid: Text\ntitle: Text\n}\n"
-        other_type = "module b\nentity Doc key (id) {\nid: Text\ntitle: Day\n}\n"
-        other_key = "module b\nentity Doc key (title) {\nid: Text\ntitle: Text\n}\n"
+        base = "module a\nDoc key (id) {\nid: Text\ntitle: Text\n}\n"
+        other_type = "module b\nDoc key (id) {\nid: Text\ntitle: Day\n}\n"
+        other_key = "module b\nDoc key (title) {\nid: Text\ntitle: Text\n}\n"
         self.assertEqual(self.kinds(base, other_type), Counter({("INCONSISTENT", True): 1}))
         self.assertEqual(self.kinds(base, other_key), Counter({("INCONSISTENT", True): 1}))
 
     def test_one_name_in_two_categories_is_a_conflict_unless_one_is_a_term(self):
-        entity = "module a\nentity Doc key (id) {\nid: Text\n}\n"
-        self.assertEqual(self.kinds(entity, "module b\nenum Doc = On | Off\n"), Counter({("INCONSISTENT", True): 1}))
+        entity = "module a\nDoc key (id) {\nid: Text\n}\n"
+        self.assertEqual(self.kinds(entity, "module b\nDoc : {On, Off}\n"), Counter({("INCONSISTENT", True): 1}))
         self.assertEqual(self.kinds(entity, "module b\nterm Doc\n"), Counter())
         self.assertEqual(self.kinds("module b\nterm Doc\n", entity), Counter())
 
     def test_a_label_that_differs_is_only_a_note(self):
         self.assertEqual(
-            self.kinds('module a\nenum S label "상태" = On | Off\n', 'module b\nenum S label "현황" = On | Off\n'),
+            self.kinds('module a\nS : {On, Off}\ntext { S "상태" }\n', 'module b\nS : {On, Off}\ntext { S "현황" }\n'),
             Counter({("LABEL_DIFFERS", False): 1}),
         )
 
@@ -1593,7 +1542,7 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("--> [*]", document)
 
     def test_assumption_must_name_a_declared_unknown(self):
-        text = "module m\nactor X\naction Do\nentity R\npermit X Do R assuming nothing"
+        text = "module m\nactor X\naction Do\nR {}\npermit X Do R assuming nothing"
         self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 1}))
 
     def test_terms_and_field_notes_are_rendered(self):

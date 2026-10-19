@@ -383,14 +383,6 @@ def expand(module: Module) -> tuple[Module, list[Problem]]:
             replace(rule, conditions=expander.formulas(rule.conditions, expander.first(rule.resource), rule.line))
             for rule in module.rules
         ],
-        exclusions=[
-            replace(
-                exclusion,
-                left=expander.formula(exclusion.left, {}, exclusion.line),
-                right=expander.formula(exclusion.right, {}, exclusion.line),
-            )
-            for exclusion in module.exclusions
-        ],
         invariants=[replace(item, formula=expander.formula(item.formula, {}, item.line)) for item in module.invariants],
         premises=[replace(item, formula=expander.formula(item.formula, {}, item.line)) for item in module.premises]
         + expander.bounds,

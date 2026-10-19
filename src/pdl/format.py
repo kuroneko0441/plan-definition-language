@@ -191,9 +191,6 @@ class Writer:
             self.text(f"rule{number}", why=rule.why)
         self.section(lines)
         lines = []
-        for exclusion in module.exclusions:
-            both = formula_source(And([exclusion.left, exclusion.right]))
-            lines.append(f"assume exclusive{exclusion.line}: !({both})")
         for keyword, items in (("assume", module.premises), ("inv", module.invariants)):
             for item in items:
                 lines.append(f"{keyword} {item.name}: {formula_source(item.formula)}")

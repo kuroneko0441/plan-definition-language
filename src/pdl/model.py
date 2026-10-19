@@ -88,13 +88,6 @@ class Rule:
 
 
 @dataclass
-class Exclusion:
-    line: int
-    left: "Formula"
-    right: "Formula"
-
-
-@dataclass
 class Transition:
     line: int
     source: str
@@ -326,7 +319,6 @@ class Module:
     screens: list[Screen] = field(default_factory=list)
     declarations: list[Declaration] = field(default_factory=list)
     rules: list[Rule] = field(default_factory=list)
-    exclusions: list[Exclusion] = field(default_factory=list)
     invariants: list[Invariant] = field(default_factory=list)
     premises: list[Premise] = field(default_factory=list)
     assertions: list[Assertion] = field(default_factory=list)

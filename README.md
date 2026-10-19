@@ -18,13 +18,12 @@ pdl build door.pdl                  # writes build/door.md
 pdl build door.pdl --draft          # writes a draft when the module has holes
 pdl build door.pdl --language en --output out
 pdl consistency plans/              # compares the modules of one plan
-pdl convert old-plans/ --output plans/
 pdl reference                       # prints the language reference of this release
 ```
 
 `build` exits with a nonzero status when a module has a hole.
 The generated sentences are Korean unless `--language en` is given.
-`convert` rewrites modules of the earlier keyword syntax.
+A module in the earlier keyword syntax must first be rewritten with `pdl convert` from `v0.2.1`.
 
 ## Example
 

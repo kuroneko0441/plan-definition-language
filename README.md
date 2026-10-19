@@ -9,7 +9,7 @@ The compiler reports the holes in a module, such as a state with no way out or a
 uv tool install git+ssh://git@github.com/kuroneko0441/plan-definition-language
 ```
 
-Append `@v0.1.0` to the URL to install a release.
+Append `@v0.2.1` to the URL to install a release.
 
 ## Usage
 

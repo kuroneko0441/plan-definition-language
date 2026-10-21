@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .model import Module
+from .syntax import UNKNOWN_FLAGS
 
 UNKNOWN_COMPARED = ("provisional", "verified", "open")
-
 
 @dataclass
 class Entry:
@@ -39,11 +39,15 @@ def collect(path: Path, module: Module) -> dict[str, Entry]:
         stored = tuple(sorted(enum.stored.items()))
         add(enum.name, enum.line, "enum", (tuple(sorted(enum.values)), stored), enum.label)
     for entity in module.entities:
-        add(entity.name, entity.line, "entity", (tuple(entity.key), tuple(sorted(entity.fields))), entity.label)
+        signature = (tuple(entity.key), tuple(sorted(entity.fields)), tuple(sorted(entity.fixed)))
+        add(entity.name, entity.line, "entity", signature, entity.label)
     for term in module.terms:
         add(term.name, term.line, "term", (), term.label)
     for declaration in module.declarations:
-        add(declaration.name, declaration.line, declaration.kind, (), declaration.label)
+        signature = tuple(sorted(declaration.grants)) if declaration.kind == "actor" else ()
+        add(declaration.name, declaration.line, declaration.kind, signature, declaration.label)
+    for constant in module.constants:
+        add(constant.name, constant.line, "const", (constant.low, constant.high), constant.label)
     for derivation in module.derivations:
         signature = (derivation.entity, derivation.source, derivation.mixed, derivation.type, tuple(derivation.sources))
         add(derivation.name, derivation.line, "derive", signature, derivation.label)
@@ -60,7 +64,10 @@ def collect(path: Path, module: Module) -> dict[str, Entry]:
         )
         add(machine.name, machine.line, "machine", signature, machine.label)
     for unknown in module.unknowns:
-        signature = (unknown.policy, *(unknown.attributes.get(key, "") for key in UNKNOWN_COMPARED))
+        signature = (
+            unknown.policy,
+            *(unknown.attributes.get(key, "no" if key in UNKNOWN_FLAGS else "") for key in UNKNOWN_COMPARED),
+        )
         add(unknown.identifier, unknown.line, "unknown", signature, unknown.attributes.get("label", ""))
     return entries
 
@@ -81,9 +88,19 @@ def difference(category: str, left: tuple, right: tuple) -> str:
         if left[0] and right[0] and left[0] != right[0]:
             parts.append(f"key {', '.join(left[0])} against {', '.join(right[0])}")
         left_fields, right_fields = dict(left[1]), dict(right[1])
-        for name in sorted(left_fields.keys() & right_fields.keys()):
+        shared = sorted(left_fields.keys() & right_fields.keys())
+        for name in shared:
             if left_fields[name] != right_fields[name]:
                 parts.append(f"field {name} is {left_fields[name]} against {right_fields[name]}")
+        for name in shared:
+            if (name in left[2]) != (name in right[2]):
+                parts.append(f"field {name} is {'fixed' if name in left[2] else 'not fixed'} against {'fixed' if name in right[2] else 'not fixed'}")
+    elif category == "actor":
+        if left and right and left != right:
+            parts.append(f"permissions {', '.join(left)} against {', '.join(right)}")
+    elif category == "const":
+        if left != right:
+            parts.append(f"range {left[0]}..{left[1]} against {right[0]}..{right[1]}")
     elif category == "machine":
         labels = ("states", "events", "initial state", "terminal states", "cyclic flag", "counters")
         parts = [f"{label} differ" for label, a, b in zip(labels, left, right) if a != b]

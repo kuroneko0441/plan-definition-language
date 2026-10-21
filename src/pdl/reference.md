@@ -24,7 +24,7 @@ Every condition is a formula over enum variables, counters, constants, and machi
 | `all v in S: f` | for every value or instance | `∀` |
 | `some v in S: f` | for some value or instance | `∃` |
 
-The ASCII spelling is the canonical one, and the Unicode symbols are aliases. A quantifier extends as far to the right as it can, so a quantifier inside a larger formula takes parentheses.
+The ASCII spelling is the canonical one, and the Unicode symbols are aliases. A quantifier ranges over an enum, a scoped entity, a machine, a counter, or a constant. A number is written in ASCII digits. A quantifier extends as far to the right as it can, so a quantifier inside a larger formula takes parentheses.
 
 ## Sets and variables
 
@@ -47,12 +47,12 @@ const limit : 1..5 assuming limit_decided
 
 The declarations mean:
 
-- `import` merges the enums, entities, terms, declarations, and unknowns of another file, resolved relative to the importing file. A cycle or a missing file is a syntax error.
+- `import` merges the enums, entities, terms, declarations, and unknowns of another file, resolved relative to the importing file. A cycle, a missing file, or a file that is not readable UTF-8 text is a syntax error.
 - `term` names a concept that the plan uses without modeling it.
-- `<Name> : {…}` declares an enum, which is a closed set of values and a variable that holds one of them.
+- `<Name> : {…}` declares an enum, which is a closed set of at least one value and a variable that holds one of them.
 - `<Name> { … }` declares an entity with typed fields, an optional `key`, and a `passive` flag. The flag takes the entity out of the permission rules, so the coverage check does not require a rule for it.
 - A field type is a built-in type (`Text`, `Int`, `Bool`, `Timestamp`, `Decimal`, `Money`, `Duration`, `Day`, `Week`, `Month`), an enum, or an entity, with `?` for optional and `list` for several.
-- `scope <Entity> <n>` creates exactly `n` instances named `<Entity>1` to `<Entity>n`, and `n` is at most 6.
+- `scope <Entity> <n>` creates exactly `n` instances named `<Entity>1` to `<Entity>n`, and `n` is at least 1 and at most 6.
 - `const <name> : <low>..<high>` declares a number that the plan has not fixed. The checker verifies the plan for every value in the range, and `assuming` ties the constant to the unknown that it stands for.
 
 ## Machines and transition relations
@@ -84,12 +84,12 @@ The parts mean:
 - `init` names the initial state, and `final` lists the states where the machine ends. `cyclic` marks a machine that returns to its initial state instead of ending.
 - `<Machine>.<Counter> : 0..<max>` declares a counter of the machine, which starts at 0. The maximum is a number or a constant, and the machine is declared before its counters.
 - `<Machine>.<Event> @<actors> { … }` declares an event and the actors or permissions that cause it. One event changes one machine.
-- A clause is `<guard> => <outcome>`. The conjuncts of the guard that compare the machine itself with `=`, `!=`, or `in` name the states that the clause leaves, and a clause without such a conjunct leaves every state.
+- A clause is `<guard> => <outcome>`. The conjuncts of the guard that compare only the machine itself, with `=`, `!=`, `in`, and any combination of them under `|`, `&`, and `!`, name the states that the clause leaves, and a clause without such a conjunct leaves every state.
 - `<Machine>' = <State>` in the outcome names the next state, and a clause without it stays in its state.
 - `<Counter>' = <n>` sets a counter, and `<Counter>' = <Counter> + <n>` raises it.
 - `this.<field>' = <Value>` sets a `var` field of the instance, and `<Instance>.<field>' = <Value>` sets a `var` field of a named instance.
 - `reject` and `ignore` as the outcome declare that the event changes nothing. `else reject` or `else ignore` covers every case that no other clause names.
-- `@<actors>` after a clause replaces the actors of the event for that clause.
+- `@<actors>` after a clause replaces the actors of the event for that clause. A `reject` or `ignore` clause changes nothing, so it names no actors.
 - `assuming <unknowns>` after a clause names the unknowns that it depends on, and the generated sentence marks the assumption.
 - `as <tag>` after a clause names it, so that the `text` block can attach a rationale or a time limit to it.
 
@@ -138,7 +138,7 @@ The statements mean:
 - `action` declares what an actor can do, optionally restricted to actors with `by` and to entities with `on`.
 - `permit` and `forbid` take an actor, an action, and an entity, each of which may be `*`, followed by an optional `:` and a formula.
 - `requires <Name>` names an item that the actor must supply, which differs from a permission that an event requires.
-- `as <tag>` names a rule, so that the `text` block can attach a rationale to it.
+- `as <tag>` names a rule, so that the `text` block can attach a rationale to it. A rule tag cannot repeat the name of a definition.
 
 A combination of an internal actor, an action, and an entity that is not passive is a hole in every world of the conditions that no rule covers. The language never reads silence as permission.
 
@@ -294,7 +294,7 @@ The entries mean:
 - `<Machine>.<Event>.else` names the `else` clause of an event.
 - `mixed` labels the extra value of a derivation.
 
-An entry that names nothing in the module is a syntax error, and so is an entry that gives a name a label or a rationale that the name cannot hold.
+An entry can name a definition that the module imports. An entry that names nothing in the module is a syntax error, and so is an entry that gives a name a label or a rationale that the name cannot hold or gives one attribute twice.
 
 ## Findings
 
@@ -330,7 +330,7 @@ The non-blocking kinds are notes:
 
 ## Modules of one plan
 
-A plan splits into modules that the compiler builds one at a time, and `pdl consistency` compares them. Entities of the same name may list different fields, because a module lists only the slice of an entity that it uses, and a term is a stub that another module may model. Two modules conflict when they define one name as different kinds of thing, give an enum different values or stored texts, give a field different types, declare different keys, describe one machine differently, or give one unknown a different policy, provisional decision, `verified` flag, or `open` flag. The source of an unknown may differ, because one question can come from several places.
+A plan splits into modules that the compiler builds one at a time, and `pdl consistency` compares them. Entities of the same name may list different fields, because a module lists only the slice of an entity that it uses, and a term is a stub that another module may model. Two modules conflict when they define one name as different kinds of thing, give an enum different values or stored texts, give a field different types, declare different keys, fix a shared field in one module only, give a constant different ranges, give one actor different permissions, describe one machine differently, or give one unknown a different policy, provisional decision, `verified` flag, or `open` flag, where an omitted flag means `no`. Whether an entity is passive and which actors and entities an action names may differ, because each module covers the permission rules of its own slice. The source of an unknown may differ, because one question can come from several places.
 
 ## Complete example
 

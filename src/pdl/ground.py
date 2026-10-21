@@ -96,7 +96,9 @@ class Expander:
             line = module.scope_lines[name]
             if name not in self.entities:
                 self.problems.append(("UNDEFINED", f"entity {name} of the scope is not defined", line, (name,)))
-            elif not 1 <= count <= MAXIMUM_SCOPE:
+            elif count < 1:
+                self.problems.append(("SYNTAX", f"the scope of {name} must be at least 1", line, (name,)))
+            elif count > MAXIMUM_SCOPE:
                 self.problems.append(("TOO_LARGE", f"the scope of {name} must be between 1 and {MAXIMUM_SCOPE}", line, (name,)))
             else:
                 self.atoms[name] = [f"{name}{number}" for number in range(1, count + 1)]
@@ -123,6 +125,18 @@ class Expander:
     def maximum(self, machine: Machine, counter: str) -> int:
         constant = self.constants.get(machine.counter_bounds.get(counter, ""))
         return constant.high if constant is not None else machine.counters[counter]
+
+    def domain(self, name: str) -> list[str] | None:
+        if name in self.variables:
+            return self.variables[name].values
+        for machine in self.module.machines:
+            if machine.entity in self.atoms:
+                continue
+            if machine.name == name:
+                return list(machine.states)
+            if name in machine.counters:
+                return [str(number) for number in range(self.maximum(machine, name) + 1)]
+        return None
 
     def relational(self, formula: Formula) -> bool:
         return (
@@ -206,7 +220,21 @@ class Expander:
             return Atom(left.text, "=", right.text)
         if right.kind == "name" and right.text in self.globals:
             return Atom(right.text, "=", left.text)
+        if left.kind == "const" and right.kind == "name":
+            self.require_value(left.type, right.text)
         return truth(left.text == right.text)
+
+    def values_of(self, name: str) -> list[str] | None:
+        if name in self.atoms:
+            return self.atoms[name]
+        if name in self.enums:
+            return self.enums[name].values
+        return self.domain(name)
+
+    def require_value(self, name: str, value: str) -> None:
+        values = self.values_of(name)
+        if values is not None and value not in values and value != NONE:
+            raise ExpansionError(f"{value} is not a value of {name}", name, value)
 
     def relate(self, operator: str, left: Leaf, right: Leaf) -> Formula:
         if operator not in ("=", "!="):
@@ -235,6 +263,8 @@ class Expander:
                         raise ExpansionError(f"{value} is not a value of {leaf.text}", leaf.text, value)
                 core: Formula = InSet(leaf.text, formula.values)
             elif leaf.kind == "const":
+                for value in formula.values:
+                    self.require_value(leaf.type, value)
                 core = truth(leaf.text in formula.values)
             else:
                 core = InSet(leaf.text, formula.values)
@@ -256,10 +286,8 @@ class Expander:
             )
         if not isinstance(formula, (ForAll, Exists)):
             assert_never(formula)
-        if formula.enum in self.atoms:
-            values = self.atoms[formula.enum]
-        elif formula.enum in self.enums:
-            values = self.enums[formula.enum].values
+        if (domain := self.values_of(formula.enum)) is not None:
+            values = domain
         elif formula.enum in self.entities:
             raise ExpansionError(f"entity {formula.enum} of the quantifier has no scope", formula.enum)
         else:

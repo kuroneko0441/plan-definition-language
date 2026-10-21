@@ -8,7 +8,24 @@ import z3
 from z3 import z3util
 
 from .kernel import Action, Assign
-from .model import And, Atom, Call, Can, Eventually, Exists, ForAll, Formula, Implies, InSet, Law, Not, Or, Reference, Term
+from .model import (
+    And,
+    Atom,
+    Call,
+    Can,
+    Eventually,
+    Exists,
+    ForAll,
+    Formula,
+    Implies,
+    InSet,
+    Law,
+    Not,
+    Or,
+    Reference,
+    Term,
+    is_number,
+)
 
 ORDERINGS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}
 # Milliseconds per query, so a query that z3 cannot finish ends as undecided instead of running without end.
@@ -48,9 +65,9 @@ class Encoder:
 
     def number(self, variable: bool, text: str, environment: Environment) -> Number | None:
         if not variable:
-            return z3.IntVal(int(text)) if text.isdigit() else None
+            return z3.IntVal(int(text)) if is_number(text) else None
         values = self.enums[text]
-        if not all(value.isdigit() for value in values):
+        if not all(is_number(value) for value in values):
             return None
         return z3.Sum([z3.If(environment[text] == position, int(value), 0) for position, value in enumerate(values)])
 
@@ -182,7 +199,7 @@ class TransitionSystem:
                 known = update.value in values[name]
                 changed[name] = values[name].index(update.value) if known else len(values[name])
                 continue
-            limit = self.encoder.number(not update.ceiling.isdigit(), update.ceiling, before)
+            limit = self.encoder.number(not is_number(update.ceiling), update.ceiling, before)
             changed[name] = changed.get(name, before[name]) + update.amount
             constraints.append(z3.BoolVal(False) if limit is None else changed[name] <= limit)
         constraints += [after[name] == changed.get(name, before[name]) for name in self.states]

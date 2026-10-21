@@ -296,6 +296,12 @@ class SeededHoleTest(unittest.TestCase):
         text = "module m\nS : {On, Off}\ninv A: S = On\ninv B: S = Off"
         self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
 
+    def test_closed_invariant_and_assumption_are_checked(self):
+        for statement in ("inv", "assume"):
+            text = f"module m\nS : {{On, Off}}\n{statement} bad: all v in S: v = On"
+            self.assertEqual(blocking_kinds(text), Counter({"CONTRADICTION": 1}))
+        self.assertEqual(blocking_kinds("module m\nS : {On, Off}\ninv good: some v in S: v = On"), Counter())
+
     def test_invariant_is_rendered_with_symbols(self):
         text = "module m\nS : {On, Off}\nP : {Open, Closed}\ninv I: ∀ s ∈ S : (s = Off ∧ P = Open) ⇒ ¬(P = Closed)\ntext { I why \"x\" }"
         module = parse_module(text)
@@ -341,6 +347,23 @@ class MachineTest(unittest.TestCase):
     def test_scenario_through_a_missing_transition_fails(self):
         text = COVERED_MACHINE.replace("Go, Go -> M = B", "Go, Go, Go -> M = B").replace("M = B => ignore", "M = B => reject")
         self.assertEqual(blocking_kinds(text), Counter({"SCENARIO_FAILED": 1}))
+
+    def test_scenario_with_an_undefined_event_or_state(self):
+        for run in ("Go, Jump -> M = B", "Go, Go -> M = Z"):
+            text = COVERED_MACHINE.replace("Go, Go -> M = B", run)
+            self.assertEqual(blocking_kinds(text), Counter({"UNDEFINED": 1}), msg=run)
+
+    def test_a_guard_can_name_its_source_states_with_or_and_not(self):
+        base = (
+            "module m\nactor U\nB : {R, K, X} init R final {X}\n"
+            "B.Hold @U {\nB = R => B' = K\nelse reject\n}\nB.Cancel @U {\n%s => B' = X\nelse reject\n}\n"
+        )
+        for guard in ("B = R | B = K", "!(B = X)", "B in {R, K} & !(B = X)"):
+            module = parse_module(base % guard)
+            self.assertEqual(blocking_kinds(base % guard), Counter(), msg=guard)
+            cancels = sorted(t.source for t in module.machines[0].transitions if t.event == "Cancel")
+            self.assertEqual(cancels, ["K", "R"], msg=guard)
+        self.assertGreater(blocking_kinds(base % "B = R | B = Typo")["UNDEFINED"], 0)
 
 
 GUARDED = (
@@ -616,6 +639,18 @@ class CapabilityTest(unittest.TestCase):
                 parse_module('module m\nimport "broken.pdl"\n', root / "m.pdl")
             self.assertEqual((raised.exception.path, raised.exception.line), ((root / "broken.pdl").resolve(), 3))
 
+    def test_an_importing_module_labels_an_imported_name(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "common.pdl").write_text('module common\nactor Customer\ntext { Customer "고객" }\n', encoding="utf-8")
+            module = parse_module('module m\nimport "common.pdl"\ntext { Customer "손님" }\n', root / "m.pdl")
+            self.assertEqual([declaration.label for declaration in module.declarations], ["손님"])
+            (root / "binary.pdl").write_bytes(b"module binary\n\xff\n")
+            with self.assertRaises(PdlSyntaxError):
+                parse_module('module m\nimport "binary.pdl"\n', root / "m.pdl")
+
     def test_imported_definition_that_clashes_is_a_duplicate(self):
         import tempfile
         from pathlib import Path as TempPath
@@ -836,6 +871,17 @@ class FormulaTest(unittest.TestCase):
         module = parse_module(GUARDED.replace("G = Off =>", "(G = Off | G = On => G = Off) =>"))
         self.assertIn("when `G = Off ∨ G = On ⇒ G = Off` holds", render(module, check(module), "en"))
         self.assertIn("`G = Off ∨ G = On ⇒ G = Off` 조건이 성립할 때", render(module, check(module), "ko"))
+
+    def test_some_ranges_over_the_same_sets_as_all(self):
+        base = "module m\nactor U\nD : {P, Q} init P final {Q}\nD.Go @U {\nD = P => D' = Q\nelse reject\n}\nconst c : 1..2\n"
+        for body in ("inv a: some s in D: s = Q", "inv b: some n in c: n = 2", "inv d: all s in D: s = P | s = Q"):
+            self.assertEqual(blocking_kinds(base + body), Counter(), msg=body)
+        for body in ("inv a: some s in D: s = Typo", "inv b: some n in c: n = 3", "inv e: some s in D: s in {Q, Typo}"):
+            self.assertEqual(blocking_kinds(base + body), Counter({"UNDEFINED": 1}), msg=body)
+
+    def test_a_scope_holds_at_least_one_instance(self):
+        self.assertEqual(blocking_kinds("module m\nO {}\nscope O 0\n"), Counter({"SYNTAX": 1}))
+        self.assertEqual(blocking_kinds("module m\nO {}\nscope O 7\n"), Counter({"TOO_LARGE": 1}))
 
     def test_a_scenario_is_replayed_in_every_given_world(self):
         passing = GUARDED + "run s: M = A & (G = On | G = Off) -> Go, Go -> M = B\n"
@@ -1443,6 +1489,31 @@ class SyntaxTest(unittest.TestCase):
             with self.assertRaises(PdlSyntaxError, msg=entry):
                 syntax.parse_module(base % entry)
 
+    def test_a_text_entry_gives_each_attribute_once(self):
+        for entry in ('S "a" "b"', 'S why "a" why "b"'):
+            with self.assertRaises(PdlSyntaxError, msg=entry):
+                syntax.parse_module("module m\nS : {On, Off}\ntext { %s }" % entry)
+
+    def test_a_rule_tag_cannot_repeat_a_definition(self):
+        text = "module m\nactor X\naction Do\nR {}\npermit X Do R as R\n"
+        with self.assertRaises(PdlSyntaxError):
+            syntax.parse_module(text)
+
+    def test_an_enum_needs_a_value(self):
+        with self.assertRaises(PdlSyntaxError):
+            syntax.parse_module("module m\nS : {}\n")
+
+    def test_a_number_is_written_in_ascii_digits(self):
+        for text in ("module m\nO {}\nscope O ²\n", "module m\nconst c : 1..²\n"):
+            with self.assertRaises(PdlSyntaxError, msg=text):
+                syntax.parse_module(text)
+
+    def test_a_clause_that_changes_nothing_names_no_actor(self):
+        for clause in ("else reject @U", "M = B => ignore @U"):
+            text = "module m\nactor U\nM : {A, B} init A final {B}\nM.Go @U {\nM = A => M' = B\n%s\n}\n" % clause
+            with self.assertRaises(PdlSyntaxError, msg=clause):
+                syntax.parse_module(text)
+
     def test_an_unknown_takes_only_the_attributes_it_can_hold(self):
         syntax.parse_module('module m\nunknown value a { label "x" source "s" provisional "1" verified no open yes }')
         for unknown in (
@@ -1764,6 +1835,25 @@ class ConsistencyTest(unittest.TestCase):
             self.kinds(unknown % ("x", "기준", "1"), unknown % ("y", "한도", "1")), Counter({("LABEL_DIFFERS", False): 1})
         )
 
+    def test_an_omitted_flag_agrees_with_no(self):
+        unknown = 'module %s\nunknown value a { label "x" provisional "1" source "s"%s }\n'
+        self.assertEqual(self.kinds(unknown % ("x", ""), unknown % ("y", " verified no open no")), Counter())
+
+    def test_constants_fixed_fields_and_grants_are_compared(self):
+        self.assertEqual(
+            self.kinds("module a\nconst c : 1..3\n", "module b\nconst c : 1..4\n"), Counter({("INCONSISTENT", True): 1})
+        )
+        fixed = "module a\nDoc {\nowner: Text fixed\n}\n"
+        self.assertEqual(self.kinds(fixed, "module b\nDoc {\nowner: Text\n}\n"), Counter({("INCONSISTENT", True): 1}))
+        grants = "module a\npermission p\npermission q\nactor X grants %s\n"
+        self.assertEqual(self.kinds(grants % "p", (grants % "q").replace("module a", "module b")), Counter({("INCONSISTENT", True): 1}))
+        self.assertEqual(self.kinds(grants % "p", "module b\nactor X\n"), Counter())
+
+    def test_passive_flags_and_action_scopes_may_differ(self):
+        self.assertEqual(self.kinds("module a\nDoc passive {}\n", "module b\nDoc {}\n"), Counter())
+        actor = "module %s\nactor X\nDoc {}\nFile {}\naction Edit by (X) on (%s)\n"
+        self.assertEqual(self.kinds(actor % ("a", "Doc"), actor % ("b", "Doc, File")), Counter())
+
     def test_the_command_reads_a_directory(self):
         import tempfile
         from contextlib import redirect_stdout
@@ -1939,9 +2029,12 @@ class RenderTest(unittest.TestCase):
 
     def test_unverified_assumption_is_listed(self):
         document = self.render_library()
-        self.assertIn("## 확인이 필요한 가정", document)
-        self.assertIn("| 연장 횟수 제한 | 한 건당 한 번만 연장할 수 있다 | 도서관 규정집 3쪽 |", document)
-        self.assertIn("| 월 점검을 시작하는 주체 | 사서가 시작한다 | 운영 회의록 |", document)
+        assumptions, _, rest = document.partition("## 미결 항목")
+        open_items = rest.split("\n## ")[0]
+        self.assertIn("## 확인이 필요한 가정", assumptions)
+        self.assertIn("| 연장 횟수 제한 | 한 건당 한 번만 연장할 수 있다 | 도서관 규정집 3쪽 |", assumptions)
+        self.assertNotIn("| 월 점검을 시작하는 주체 |", assumptions)
+        self.assertIn("| 월 점검을 시작하는 주체 | 사서가 시작한다 | 운영 회의록 |", open_items)
         self.assertNotIn("| 기록을 고치는 주체 |", document)
 
     def test_machine_is_rendered_as_a_diagram(self):

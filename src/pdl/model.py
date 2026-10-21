@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Union
 
 
+def is_number(text: str) -> bool:
+    return text.isascii() and text.isdigit()
+
+
 @dataclass
 class EnumDefinition:
     line: int

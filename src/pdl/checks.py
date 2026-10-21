@@ -35,6 +35,7 @@ from .model import (
     Scenario,
     Term,
     Transition,
+    is_number,
 )
 
 TIME_TYPES = ("Day", "Week", "Month")
@@ -180,7 +181,7 @@ def evaluate(formula: Formula, assignment: dict[str, str], bound: dict[str, str]
         left = resolve(formula.left, assignment, bound)
         right = resolve(formula.right, assignment, bound)
         if formula.operator in ORDERINGS:
-            return left.isdigit() and right.isdigit() and ORDERINGS[formula.operator](int(left), int(right))
+            return is_number(left) and is_number(right) and ORDERINGS[formula.operator](int(left), int(right))
         return (left == right) == (formula.operator == "=")
     if isinstance(formula, InSet):
         return resolve(formula.left, assignment, bound) in formula.values
@@ -402,7 +403,7 @@ def check_formula(
         left = term_enum(formula.left, bound, index)
         right = term_enum(formula.right, bound, index)
         numbers = [
-            term.isdigit() if enum is None else all(value.isdigit() for value in index.enums[enum].values)
+            is_number(term) if enum is None else all(is_number(value) for value in index.enums[enum].values)
             for term, enum in ((formula.left, left), (formula.right, right))
         ]
         pair = (*owner, formula.left, formula.right)
@@ -466,6 +467,11 @@ def check_invariants(module: Module, index: Index) -> list[Finding]:
     findings: list[Finding] = []
     for item in (*module.invariants, *module.premises, *module.assertions):
         check_formula(item.formula, {}, index, item.line, findings, (item.name,))
+    if findings:
+        return findings
+    for item, (formula, names) in zip((*module.invariants, *module.premises), index.invariant_terms):
+        if not names and not evaluate(formula, {}, {}, index):
+            findings.append(Finding("CONTRADICTION", f"{item.name} holds in no case", item.line, subject=(item.name,)))
     if findings:
         return findings
     enums = sorted(set().union(*(names for _, names in index.invariant_terms)))
@@ -1822,6 +1828,13 @@ def check_scenarios(module: Module, index: Index) -> list[Finding]:
                 Finding(
                     "UNDEFINED", f"machine {scenario.machine} is not defined", scenario.line, subject=(scenario.name, scenario.machine)
                 )
+            )
+            continue
+        undefined = [f"{state} is not a state of {machine.name}" for state in (scenario.start, scenario.expect) if state not in machine.states]
+        undefined += [f"{event} is not an event of {machine.name}" for event in scenario.events if event not in machine.events]
+        if undefined:
+            findings.append(
+                Finding("UNDEFINED", f"scenario {scenario.name}: {'; '.join(undefined)}", scenario.line, subject=(scenario.name,))
             )
             continue
         problems = [

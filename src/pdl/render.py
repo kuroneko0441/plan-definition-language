@@ -26,6 +26,7 @@ LABELS = {
         "unverified_note": "원문에 적혀 있지 않아 임시로 정한 내용이며, 현업 확인 전까지는 확정된 규칙이 아니다. 본문에서 이 가정에 기대는 줄에는 가정 표시를 붙였다.",
         "assumption": "가정",
         "open_item": "미결 있음",
+        "open_items": "미결 항목",
         "appendix": "부록",
         "appendix_note": "아래는 개발자를 위한 정리이다.",
         "matrix_note": "조건부는 행 상태나 업로드 상태 같은 조건에 따라 허용 여부가 달라진다는 뜻이며, 조건은 위의 규칙 문장을 따른다.",
@@ -97,6 +98,7 @@ LABELS = {
         "unverified_note": "These items are not stated in the source and were decided provisionally. Lines that depend on them carry an assumption mark.",
         "assumption": "assumption",
         "open_item": "open item",
+        "open_items": "Open items",
         "appendix": "Appendix",
         "appendix_note": "The tables below are for developers.",
         "matrix_note": "Conditional means the result depends on a condition stated in the rules above.",
@@ -531,20 +533,25 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
         lines += [f"## {labels['draft']}", "", labels["draft_note"], ""]
         lines += [f"- {finding.kind}: {finding.message}" for finding in findings if finding.blocking]
         lines.append("")
-    unverified = [finding for finding in findings if finding.kind == "UNVERIFIED"]
-    if unverified:
-        lines += [f"## {labels['unverified']}", "", labels["unverified_note"], ""]
-        reported = {f.subject[0] for f in findings if f.kind in ("UNVERIFIED", "UNKNOWN_VALUE") and f.subject}
+    reported = {f.subject[0] for f in findings if f.kind in ("UNVERIFIED", "UNKNOWN_VALUE") and f.subject}
+    pending = [
+        u
+        for u in module.unknowns
+        if u.policy == "value" and u.attributes.get("verified") != "yes" and u.identifier in reported
+    ]
+    for heading, note, flag in (("unverified", labels["unverified_note"], False), ("open_items", "", True)):
         rows = [
             [
                 u.attributes.get("label", u.identifier),
                 u.attributes.get("provisional", ""),
                 u.attributes.get("source", ""),
             ]
-            for u in module.unknowns
-            if u.policy == "value" and u.attributes.get("verified") != "yes" and u.identifier in reported
+            for u in pending
+            if (u.attributes.get("open") == "yes") == flag
         ]
-        lines += table([labels["name"], labels["provisional"], labels["source"]], rows)
+        if rows:
+            lines += [f"## {labels[heading]}", ""] + ([note, ""] if note else [])
+            lines += table([labels["name"], labels["provisional"], labels["source"]], rows)
     if module.terms:
         lines += [f"## {labels['terms']}", ""]
         lines += [f"- {names.show(term.name)}: {term.why}" for term in module.terms]

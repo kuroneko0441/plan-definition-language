@@ -42,6 +42,7 @@ from .model import (
     TermDefinition,
     Transition,
     Unknown,
+    is_number,
 )
 
 TOKEN_PATTERN = re.compile(
@@ -145,6 +146,29 @@ def conjuncts(formula: Formula) -> list[Formula]:
     return list(formula.operands) if isinstance(formula, And) else [formula]
 
 
+def source_states(condition: Formula, machine: Machine) -> list[str] | None:
+    if isinstance(condition, Atom) and condition.left == machine.name and condition.operator == "=":
+        return [condition.right]
+    if isinstance(condition, Atom) and condition.left == machine.name and condition.operator == "!=":
+        return [state for state in machine.states if state != condition.right]
+    if isinstance(condition, InSet) and condition.left == machine.name:
+        return condition.values
+    # A compound guard with a misspelled state stays a condition, so the condition check reports the name.
+    if isinstance(condition, Not):
+        inner = source_states(condition.operand, machine)
+        if inner is None or not set(inner) <= set(machine.states):
+            return None
+        return [state for state in machine.states if state not in inner]
+    if isinstance(condition, (And, Or)) and condition.operands:
+        parts = [source_states(operand, machine) for operand in condition.operands]
+        if any(part is None or not set(part) <= set(machine.states) for part in parts):
+            return None
+        if isinstance(condition, Or):
+            return [state for state in machine.states if any(state in part for part in parts if part is not None)]
+        return [state for state in machine.states if all(state in part for part in parts if part is not None)]
+    return None
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
@@ -205,7 +229,7 @@ class Parser:
 
     def number(self) -> int:
         token = self.advance()
-        if token.kind != "word" or not token.value.isdigit():
+        if token.kind != "word" or not is_number(token.value):
             raise PdlSyntaxError(token.line, f"expected a number but found {token.value!r}")
         return int(token.value)
 
@@ -360,6 +384,8 @@ class Parser:
                 raise PdlSyntaxError(token.line, f"unexpected {token.value!r}")
             statements.get(token.value, self.named)(module)
         self.finish(module)
+        if not module.imports:
+            self.place_texts(module)
         return module
 
     def named(self, module: Module) -> None:
@@ -379,6 +405,8 @@ class Parser:
             following = self.closing() + 1
             if self.at("{") and not any(self.at(keyword, following) for keyword in ("init", "final", "cyclic")):
                 values = self.braced_words()
+                if not values:
+                    raise PdlSyntaxError(token.line, f"enum {name} needs at least one value")
                 module.enums.append(EnumDefinition(token.line, name, values))
                 module.definitions.append(("enum", name, token.line))
             else:
@@ -414,8 +442,8 @@ class Parser:
         machine = next((machine for machine in module.machines if machine.name == owner), None)
         if machine is None:
             raise PdlSyntaxError(line, f"counter {name} is declared before its machine {owner}")
-        machine.counters[name] = int(maximum) if maximum.isdigit() else 0
-        if not maximum.isdigit():
+        machine.counters[name] = int(maximum) if is_number(maximum) else 0
+        if not is_number(maximum):
             machine.counter_bounds[name] = maximum
         module.definitions.append(("counter", name, line))
 
@@ -445,6 +473,8 @@ class Parser:
                 while self.accept("&"):
                     self.update(clause, machine)
         if self.accept("@"):
+            if clause.kind != "move":
+                raise PdlSyntaxError(clause.line, f"a {clause.kind} clause changes nothing, so it names no actor")
             clause.actors = self.comma_words()
         clause.assumes = self.assumptions()
         if self.accept("as"):
@@ -470,7 +500,7 @@ class Parser:
             if value != name:
                 raise PdlSyntaxError(clause.line, f"{name}' must be {name} plus a number")
             clause.effects.append((name, "+", self.number()))
-        elif value.isdigit():
+        elif is_number(value):
             clause.effects.append((name, "=", int(value)))
         else:
             raise PdlSyntaxError(clause.line, f"{name}' must be a number or {name} plus a number")
@@ -708,12 +738,15 @@ class Parser:
             while True:
                 following = self.peek()
                 if following is not None and following.kind == "string":
-                    entry.attributes["label"] = self.string()
+                    attribute = "label"
                 elif following is not None and following.kind == "word" and following.value in TEXT_ATTRIBUTES:
                     attribute = self.word()
-                    entry.attributes[attribute] = self.string()
                 else:
                     break
+                if attribute in entry.attributes:
+                    named = "a label" if attribute == "label" else attribute
+                    raise PdlSyntaxError(following.line, f"text gives {'.'.join(entry.key)} {named} twice")
+                entry.attributes[attribute] = self.string()
             self.texts.append(entry)
 
     def finish(self, module: Module) -> None:
@@ -730,6 +763,15 @@ class Parser:
                 self.place(machine, block, clause)
         for run in self.runs:
             self.place_run(module, run)
+
+    def place_texts(self, module: Module) -> None:
+        machines = {}
+        for machine in module.machines:
+            machines.setdefault(machine.name, machine)
+        defined = {name for _, name, _ in module.definitions}
+        for key, items in self.tags.items():
+            if len(key) == 1 and key[0] in defined:
+                raise PdlSyntaxError(items[0].line, f"rule tag {key[0]} repeats the name of a definition")
         for entry in self.texts:
             self.place_text(module, machines, entry)
 
@@ -737,13 +779,8 @@ class Parser:
         sources: list[str] | None = None
         conditions = []
         for condition in clause.guard:
-            if isinstance(condition, Atom) and condition.left == machine.name and condition.operator == "=":
-                chosen = [condition.right]
-            elif isinstance(condition, Atom) and condition.left == machine.name and condition.operator == "!=":
-                chosen = [state for state in machine.states if state != condition.right]
-            elif isinstance(condition, InSet) and condition.left == machine.name:
-                chosen = condition.values
-            else:
+            chosen = source_states(condition, machine)
+            if chosen is None:
                 conditions.append(condition)
                 continue
             sources = chosen if sources is None else [state for state in sources if state in chosen]
@@ -892,9 +929,16 @@ def merge_imports(
         # Each imported file numbers its lines from its own offset, which no file reaches with its own lines.
         offset = 1_000_000 * (len(sources) + 1)
         sources.append((offset, target))
-        imported = Parser(tokenize(target.read_text(encoding="utf-8"), offset)).module()
+        try:
+            text = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise PdlSyntaxError(line, f"imported file {relative} cannot be read: {error}") from None
+        parser = Parser(tokenize(text, offset))
+        imported = parser.module()
         merged.add(target)
         merge_imports(imported, target, merged, [*stack, target], sources)
+        if imported.imports:
+            parser.place_texts(imported)
         module.enums += imported.enums
         module.entities += imported.entities
         module.terms += imported.terms
@@ -904,11 +948,13 @@ def merge_imports(
 
 
 def parse_module(text: str, source: Path | None = None) -> Module:
-    module = Parser(tokenize(text)).module()
+    parser = Parser(tokenize(text))
+    module = parser.module()
     if module.imports:
         resolved = source.resolve() if source is not None else None
         try:
             merge_imports(module, source, {resolved} if resolved else set(), [resolved] if resolved else [], module.sources)
+            parser.place_texts(module)
         except PdlSyntaxError as error:
             path, line = module.locate(error.line)
             raise PdlSyntaxError(line, error.message, path or source) from None

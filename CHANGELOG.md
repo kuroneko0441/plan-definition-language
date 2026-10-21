@@ -2,6 +2,32 @@
 
 This file records the notable changes of each release of the plan definition language (PDL) compiler. Each release is tagged `v<version>` in the Git repository.
 
+## 0.5.0 - 2026-10-21
+
+This release adds the following features:
+
+- A module reaches one of the levels `poc`, `logical`, `usable`, and `confirmed`, and the generated document states it. `--require <level>` of `build` and `check` sets the level that a module must reach, and each finding in JSON has the `level` it bounds.
+- A machine declaration takes `else reject` or `else ignore`, which applies to every event of the machine that has no `else` clause of its own.
+- A `text` entry can label a definition that the module imports.
+- `pdl consistency` reports `REDECLARED` when two files declare one unknown instead of sharing it through `import`, and compares constant ranges, `fixed` fields, and the permissions that an actor grants.
+- A quantifier ranges over a machine, a counter, or a constant, and a guard names its source states with `|`, `&`, and `!`.
+
+This release changes the following behavior:
+
+- A final state rejects every event that no clause of it names, so it is no longer reported as `UNHANDLED`.
+- An unverified unknown that nothing assumes is reported as one `UNVERIFIED` note instead of `UNREFERENCED` and `UNVERIFIED`.
+- An unknown with `open yes` is listed under open items in the generated document instead of the assumptions.
+- `@` after a `reject` or `ignore` clause, an attribute given twice in a `text` entry, a rule tag named like a definition, an enum without values, and a scope of 0 are syntax errors.
+
+This release fixes the following problems:
+
+- An invariant or an assumption without a free enum, such as `all v in S: v = On`, is checked.
+- A guard such as `B = R | B = K` no longer adds a transition from every state.
+- A value outside the enum in the body of `some` is reported as `UNDEFINED`.
+- A run through an undefined event of one machine is reported as `UNDEFINED`.
+- An omitted `verified` or `open` flag agrees with `no` in `pdl consistency`.
+- A number in non-ASCII digits and an imported file that is not UTF-8 text are syntax errors instead of tracebacks.
+
 ## 0.4.0 - 2026-10-19
 
 This release adds the following features:

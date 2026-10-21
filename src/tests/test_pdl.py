@@ -2131,7 +2131,7 @@ class LevelTest(unittest.TestCase):
             self.assertFalse((output / "m.md").exists())
             with redirect_stdout(StringIO()):
                 self.assertEqual(main(["build", str(source), "--output", str(output), "--require", "poc"]), 0)
-            self.assertIn("기획 수준: PoC 가능", (output / "m.md").read_text(encoding="utf-8"))
+            self.assertIn("기획 수준: PoC 가능(기획에 모순이나 빠진 정의 없음)", (output / "m.md").read_text(encoding="utf-8"))
             with redirect_stdout(StringIO()) as printed:
                 main(["check", str(source), "--format", "json"])
             records = json.loads(printed.getvalue())

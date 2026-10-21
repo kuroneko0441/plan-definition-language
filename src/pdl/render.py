@@ -21,9 +21,31 @@ from .prose import (
 )
 
 LEVEL_NAMES = {
-    "ko": {"": "PoC 미달", "poc": "PoC 가능", "logical": "논리 오류 없음", "usable": "실사용 가능", "confirmed": "확정"},
-    "en": {"": "below PoC", "poc": "PoC ready", "logical": "logically sound", "usable": "usable", "confirmed": "confirmed"},
+    "ko": {"": "PoC 불가", "poc": "PoC 가능", "logical": "설계 검토 가능", "usable": "실사용 가능", "confirmed": "확정"},
+    "en": {"": "below PoC", "poc": "PoC ready", "logical": "ready for design review", "usable": "usable", "confirmed": "confirmed"},
 }
+
+LEVEL_DESCRIPTIONS = {
+    "ko": {
+        "": "기획에 모순이나 빠진 정의 있음",
+        "poc": "기획에 모순이나 빠진 정의 없음",
+        "logical": "처리 누락이나 논리 오류 없음",
+        "usable": "미정 사항을 모두 잠정 결정하고 근거를 남김",
+        "confirmed": "잠정 결정을 현업이 모두 확인함",
+    },
+    "en": {
+        "": "contradictions or missing definitions",
+        "poc": "no contradictions or missing definitions",
+        "logical": "no unhandled cases or logic errors",
+        "usable": "every open question has a provisional decision with a source",
+        "confirmed": "the business confirmed every provisional decision",
+    },
+}
+
+
+def level_title(language: str, level: str) -> str:
+    space = "" if language == "ko" else " "
+    return f"{LEVEL_NAMES[language][level]}{space}({LEVEL_DESCRIPTIONS[language][level]})"
 
 LABELS = {
     "ko": {
@@ -536,7 +558,7 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
 
     title = module.label if language == "ko" and module.label else module.name
     level = achieved([finding.level for finding in findings])
-    lines = [f"# {title}", "", f"{labels['level']}: {LEVEL_NAMES[language][level]}", ""]
+    lines = [f"# {title}", "", f"{labels['level']}: {level_title(language, level)}", ""]
     if draft:
         lines += [f"## {labels['draft']}", "", labels["draft_note"], ""]
         lines += [f"- {finding.kind}: {finding.message}" for finding in findings if finding.blocking]

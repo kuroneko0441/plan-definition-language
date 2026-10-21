@@ -1845,19 +1845,34 @@ class ConsistencyTest(unittest.TestCase):
 
     def test_an_unknown_that_differs_between_modules(self):
         unknown = 'module %s\nunknown value a { label "%s" provisional "%s" source "s" }\n'
-        self.assertEqual(self.kinds(unknown % ("x", "기준", "1"), unknown % ("y", "기준", "1")), Counter())
+        redeclared = Counter({("REDECLARED", False): 1})
+        self.assertEqual(self.kinds(unknown % ("x", "기준", "1"), unknown % ("y", "기준", "1")), redeclared)
         elsewhere = (unknown % ("y", "기준", "1")).replace('source "s"', 'source "t"')
-        self.assertEqual(self.kinds(unknown % ("x", "기준", "1"), elsewhere), Counter())
+        self.assertEqual(self.kinds(unknown % ("x", "기준", "1"), elsewhere), redeclared)
         self.assertEqual(
             self.kinds(unknown % ("x", "기준", "1"), unknown % ("y", "기준", "2")), Counter({("INCONSISTENT", True): 1})
         )
         self.assertEqual(
-            self.kinds(unknown % ("x", "기준", "1"), unknown % ("y", "한도", "1")), Counter({("LABEL_DIFFERS", False): 1})
+            self.kinds(unknown % ("x", "기준", "1"), unknown % ("y", "한도", "1")),
+            redeclared + Counter({("LABEL_DIFFERS", False): 1}),
         )
+
+    def test_an_unknown_shared_through_import_is_not_redeclared(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "common.pdl").write_text('module common\nunknown value a { provisional "1" source "s" }\n', encoding="utf-8")
+            modules = [
+                (root / name, parse_module(f'module {name[0]}\nimport "common.pdl"\n', root / name)) for name in ("x.pdl", "y.pdl")
+            ]
+            self.assertEqual(compare(modules), [])
 
     def test_an_omitted_flag_agrees_with_no(self):
         unknown = 'module %s\nunknown value a { label "x" provisional "1" source "s"%s }\n'
-        self.assertEqual(self.kinds(unknown % ("x", ""), unknown % ("y", " verified no open no")), Counter())
+        self.assertEqual(
+            self.kinds(unknown % ("x", ""), unknown % ("y", " verified no open no")), Counter({("REDECLARED", False): 1})
+        )
 
     def test_constants_fixed_fields_and_grants_are_compared(self):
         self.assertEqual(

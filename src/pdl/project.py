@@ -124,7 +124,8 @@ def compare(modules: list[tuple[Path, Module]]) -> list[ProjectFinding]:
             if first.category != entry.category and "term" in (first.category, entry.category):
                 if first.category == "term":
                     seen[name] = entry
-            elif first.category != entry.category:
+                continue
+            if first.category != entry.category:
                 findings.append(
                     ProjectFinding(
                         "INCONSISTENT",
@@ -134,7 +135,8 @@ def compare(modules: list[tuple[Path, Module]]) -> list[ProjectFinding]:
                         subject=(name,),
                     )
                 )
-            elif difference(first.category, first.signature, entry.signature):
+                continue
+            if difference(first.category, first.signature, entry.signature):
                 findings.append(
                     ProjectFinding(
                         "INCONSISTENT",
@@ -144,7 +146,19 @@ def compare(modules: list[tuple[Path, Module]]) -> list[ProjectFinding]:
                         subject=(name,),
                     )
                 )
-            elif first.label and entry.label and first.label != entry.label:
+                continue
+            if entry.category == "unknown" and first.path.resolve() != entry.path.resolve():
+                findings.append(
+                    ProjectFinding(
+                        "REDECLARED",
+                        f"unknown {name} is also declared at {where}, so declare it once in a file that both modules import",
+                        path,
+                        entry.line,
+                        blocking=False,
+                        subject=(name,),
+                    )
+                )
+            if first.label and entry.label and first.label != entry.label:
                 findings.append(
                     ProjectFinding(
                         "LABEL_DIFFERS",

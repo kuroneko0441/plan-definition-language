@@ -2,6 +2,12 @@
 
 This file records the notable changes of each release of the plan definition language (PDL) compiler. Each release is tagged `v<version>` in the Git repository.
 
+## 0.5.1 - 2026-10-21
+
+This release changes the following behavior:
+
+- The generated document follows the level name with what the level guarantees, and the `logical` level reads 설계 검토 가능 in Korean and ready for design review in English.
+
 ## 0.5.0 - 2026-10-21
 
 This release adds the following features:

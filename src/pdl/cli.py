@@ -7,7 +7,7 @@ from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from .checks import Finding, compile_text
+from .checks import DEFAULT_LEVEL, LEVELS, Finding, achieved, compile_text
 from .model import Module
 from .project import compare
 from .reference import reference
@@ -15,13 +15,13 @@ from .render import render
 from .syntax import PdlSyntaxError, parse_module
 
 
-def read_module(path: Path) -> tuple[Module | None, list[Finding]] | None:
+def read_module(path: Path, require: str = DEFAULT_LEVEL) -> tuple[Module | None, list[Finding]] | None:
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
         print(f"{path}: cannot read the file: {error}", file=sys.stderr)
         return None
-    return compile_text(text, path)
+    return compile_text(text, path, require)
 
 
 def finding_record(path: Path, finding: Finding) -> dict:
@@ -31,6 +31,7 @@ def finding_record(path: Path, finding: Finding) -> dict:
         "kind": finding.kind,
         "key": finding.key,
         "blocking": finding.blocking,
+        "level": finding.level or None,
         "message": finding.message,
         "subject": list(finding.subject),
         "witness": asdict(finding.witness) if finding.witness else None,
@@ -38,7 +39,7 @@ def finding_record(path: Path, finding: Finding) -> dict:
 
 
 def process(path: Path, options: argparse.Namespace, records: list[dict]) -> bool:
-    compiled = read_module(path)
+    compiled = read_module(path, options.require)
     if compiled is None:
         return False
     module, findings = compiled
@@ -49,6 +50,8 @@ def process(path: Path, options: argparse.Namespace, records: list[dict]) -> boo
             label = "HOLE" if finding.blocking else "NOTE"
             print(f"{finding.path or path}:{finding.line}: {label} {finding.kind} {finding.message}")
     failed = any(finding.blocking for finding in findings)
+    if human and module is not None:
+        print(f"{module.name}: reaches {achieved([finding.level for finding in findings]) or 'no level'}")
     if module is None or options.command == "check":
         return not failed
     if failed and not options.draft:
@@ -65,7 +68,9 @@ def process(path: Path, options: argparse.Namespace, records: list[dict]) -> boo
 
 
 def build_file(path: Path, output_directory: Path, language: str, draft: bool = False) -> bool:
-    options = argparse.Namespace(command="build", output=output_directory, language=language, draft=draft, format="text")
+    options = argparse.Namespace(
+        command="build", output=output_directory, language=language, draft=draft, format="text", require=DEFAULT_LEVEL
+    )
     return process(path, options, [])
 
 
@@ -111,6 +116,7 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--language", choices=["ko", "en"], default="ko")
     parser.add_argument("--draft", action="store_true")
     parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--require", choices=LEVELS, default=DEFAULT_LEVEL)
     parser.add_argument("--version", action="version", version=f"pdl {release()}")
     options = parser.parse_args(arguments)
     if options.command == "reference":

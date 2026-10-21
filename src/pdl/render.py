@@ -2,7 +2,7 @@
 
 from itertools import product
 
-from .checks import Finding, Index, guard_enums, row_entities, rule_matches, triple_outcomes
+from .checks import Finding, Index, achieved, guard_enums, row_entities, rule_matches, triple_outcomes
 from .ground import expand
 from .model import (
     Machine,
@@ -19,6 +19,11 @@ from .prose import (
     korean_condition,
     sentence,
 )
+
+LEVEL_NAMES = {
+    "ko": {"": "PoC 미달", "poc": "PoC 가능", "logical": "논리 오류 없음", "usable": "실사용 가능", "confirmed": "확정"},
+    "en": {"": "below PoC", "poc": "PoC ready", "logical": "logically sound", "usable": "usable", "confirmed": "confirmed"},
+}
 
 LABELS = {
     "ko": {
@@ -44,6 +49,7 @@ LABELS = {
         "formulas": "식",
         "draft": "초안",
         "draft_note": "이 문서는 구멍이 남은 상태의 초안이며, 아래 구멍이 모두 해소되어야 확정된 기획서가 된다.",
+        "level": "기획 수준",
         "derivations": "상태 판정 규칙",
         "computed": "계산되는 값",
         "invariants": "항상 성립하는 조건",
@@ -116,6 +122,7 @@ LABELS = {
         "formulas": "Formulas",
         "draft": "Draft",
         "draft_note": "This document is a draft with open holes. It is not a final plan until all holes below are resolved.",
+        "level": "Plan level",
         "derivations": "Status rules",
         "computed": "Computed values",
         "invariants": "Invariants",
@@ -528,7 +535,8 @@ def render(module: Module, findings: list[Finding], language: str = "ko", draft:
         return f"{names.show(name)} ({name})" if names.show(name) != name else name
 
     title = module.label if language == "ko" and module.label else module.name
-    lines = [f"# {title}", ""]
+    level = achieved([finding.level for finding in findings])
+    lines = [f"# {title}", "", f"{labels['level']}: {LEVEL_NAMES[language][level]}", ""]
     if draft:
         lines += [f"## {labels['draft']}", "", labels["draft_note"], ""]
         lines += [f"- {finding.kind}: {finding.message}" for finding in findings if finding.blocking]

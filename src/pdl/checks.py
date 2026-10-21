@@ -44,6 +44,40 @@ ORDERINGS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operat
 ENUMERATION_LIMIT = 20000
 SAMPLE_LIMIT = 6
 SYSTEM_LIMIT = 100000
+LEVELS = ("poc", "logical", "usable", "confirmed")
+DEFAULT_LEVEL = "usable"
+KIND_LEVELS = {
+    **dict.fromkeys(("SYNTAX", "UNDEFINED", "DUPLICATE", "CONTRADICTION", "UNIT_MISMATCH", "INCONSISTENT", "MISSING"), "poc"),
+    **dict.fromkeys(
+        (
+            "UNCOVERED", "UNHANDLED", "OWNERLESS", "INAPPLICABLE", "UNREACHABLE", "TRAP", "OVERFLOW",
+            "INVARIANT_VIOLATED", "ASSERTION_FAILED", "SCENARIO_FAILED", "TOO_LARGE",
+        ),
+        "logical",
+    ),
+    **dict.fromkeys(("UNKNOWN_STRUCTURE", "UNKNOWN_VALUE", "MISSING_SOURCE"), "usable"),
+    "UNVERIFIED": "confirmed",
+}
+NOTE_KINDS = ("UNREFERENCED", "LABEL_DIFFERS", "REDECLARED")
+
+
+def kind_level(kind: str) -> str:
+    if kind in NOTE_KINDS:
+        return ""
+    return KIND_LEVELS.get(kind, "poc")
+
+
+def blocks(level: str, require: str) -> bool:
+    return bool(level) and LEVELS.index(level) <= LEVELS.index(require)
+
+
+def achieved(levels: list[str]) -> str:
+    reached = ""
+    for level in LEVELS:
+        if any(blocks(found, level) for found in levels):
+            break
+        reached = level
+    return reached
 
 
 def base_type(type_name: str) -> str:
@@ -66,6 +100,7 @@ class Finding:
     subject: tuple[str, ...] = ()
     witness: Witness | None = None
     key: str = ""
+    level: str = ""
 
 
 @dataclass
@@ -289,15 +324,17 @@ def triple_outcomes(
     ]
 
 
-def compile_text(text: str, source: Path | None = None) -> tuple[Module | None, list[Finding]]:
+def compile_text(
+    text: str, source: Path | None = None, require: str = DEFAULT_LEVEL
+) -> tuple[Module | None, list[Finding]]:
     try:
         module = parse_module(text, source)
     except PdlSyntaxError as error:
-        return None, [Finding("SYNTAX", error.message, error.line, path=error.path, key="SYNTAX:")]
-    return module, check(module)
+        return None, [Finding("SYNTAX", error.message, error.line, path=error.path, key="SYNTAX:", level="poc")]
+    return module, check(module, require)
 
 
-def check(module: Module) -> list[Finding]:
+def check(module: Module, require: str = DEFAULT_LEVEL) -> list[Finding]:
     module, problems = expand(module)
     index = Index(module)
     findings = [Finding(kind, message, line, subject=subject) for kind, message, line, subject in problems]
@@ -322,6 +359,8 @@ def check(module: Module) -> list[Finding]:
         findings.extend(step(module, index))
     for finding in findings:
         finding.path, finding.line = module.locate(finding.line)
+        finding.level = kind_level(finding.kind)
+        finding.blocking = blocks(finding.level, require)
     occurrences: dict[str, int] = {}
     for finding in findings:
         key = f"{finding.kind}:{'/'.join(finding.subject)}"

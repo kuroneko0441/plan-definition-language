@@ -299,7 +299,7 @@ An entry can name a definition that the module imports. An entry that names noth
 
 ## Findings
 
-A finding is one hole or one note that the compiler reports about a module, with a kind, a source file and line, and a message. A blocking finding fails the build. The blocking kinds are:
+A finding is one hole or one note that the compiler reports about a module, with a kind, a source file and line, and a message. A blocking finding fails the build. The blocking kinds at the default required level are:
 
 - `SYNTAX`: the module or a file it imports does not follow this reference.
 - `UNDEFINED`: a name is used but not defined, a clause sets a field without the `var` mark, a value is outside the set of a field, or a `fair` statement names an event whose guard reads a free value.
@@ -329,6 +329,15 @@ The non-blocking kinds are notes:
 - `UNREFERENCED`: a declared name that nothing uses, which is an unknown value that no statement or clause assumes and that `UNVERIFIED` does not report, or a permission that no event, clause, or screen requires.
 - `LABEL_DIFFERS`: two modules label one name differently.
 - `REDECLARED`: two files declare one unknown, so the modules ask the question twice instead of sharing it through `import`.
+
+Each kind except `UNREFERENCED`, `LABEL_DIFFERS`, and `REDECLARED` bounds the level that a module reaches. A module reaches a level when no finding bounds that level or a lower one. The levels, from the lowest, are:
+
+- `poc`: the defined parts do not contradict each other. `SYNTAX`, `UNDEFINED`, `DUPLICATE`, `CONTRADICTION`, `UNIT_MISMATCH`, `INCONSISTENT`, and `MISSING` bound it.
+- `logical`: every case is covered and checked. `UNCOVERED`, `UNHANDLED`, `OWNERLESS`, `INAPPLICABLE`, `UNREACHABLE`, `TRAP`, `OVERFLOW`, `INVARIANT_VIOLATED`, `ASSERTION_FAILED`, `SCENARIO_FAILED`, and `TOO_LARGE` bound it.
+- `usable`: every structure is decided and every provisional value has a source. `UNKNOWN_STRUCTURE`, `UNKNOWN_VALUE`, and `MISSING_SOURCE` bound it.
+- `confirmed`: the business has confirmed every provisional decision. `UNVERIFIED` bounds it.
+
+`--require <level>` of `pdl build` and `pdl check` sets the level that a module must reach, and `usable` is the default. A finding is blocking when it bounds the required level or a lower one, so the blocking and non-blocking kinds listed earlier hold for the default. The generated document states the level that the module reaches.
 
 ## Modules of one plan
 

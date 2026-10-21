@@ -2080,5 +2080,63 @@ class RenderTest(unittest.TestCase):
         self.assertIn("B --> [*]", document)
 
 
+LEVELED = (
+    "module m\nexternal Ext\nM : {A, B} init A final {B}\nM.Go @Ext {\nM = A => M' = B\n}\n"
+    "unknown value v { provisional \"1\" source \"s\"%s }\n"
+)
+
+
+class LevelTest(unittest.TestCase):
+    def reached(self, text: str) -> str:
+        from pdl.checks import achieved
+
+        return achieved([finding.level for finding in check(parse_module(text))])
+
+    def test_each_kind_of_hole_bounds_the_level_a_module_reaches(self):
+        self.assertEqual(self.reached(LEVELED % " verified yes"), "confirmed")
+        self.assertEqual(self.reached(LEVELED % ""), "usable")
+        self.assertEqual(self.reached((LEVELED % "").replace('source "s"', "")), "logical")
+        self.assertEqual(self.reached((LEVELED % "") + "M.Stop @Ext {\n}\n"), "poc")
+        self.assertEqual(self.reached((LEVELED % "").replace("M' = B", "M' = Z")), "")
+
+    def test_the_required_level_decides_which_findings_block(self):
+        gap = (LEVELED % " verified yes") + "M.Stop @Ext {\n}\n"
+        for require, blocking in (("poc", []), ("logical", ["UNHANDLED"]), ("confirmed", ["UNHANDLED"])):
+            findings = check(parse_module(gap), require)
+            self.assertEqual([f.kind for f in findings if f.blocking], blocking, msg=require)
+        unverified = check(parse_module(LEVELED % ""), "confirmed")
+        self.assertEqual([(f.kind, f.level, f.blocking) for f in unverified], [("UNVERIFIED", "confirmed", True)])
+
+    def test_the_document_states_the_level_it_reaches(self):
+        module = parse_module(LEVELED % "")
+        self.assertIn("기획 수준: 실사용 가능", render(module, check(module)))
+        self.assertIn("Plan level: usable", render(module, check(module), "en"))
+
+    def test_build_writes_a_document_for_the_required_level(self):
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from pdl.cli import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "m.pdl"
+            source.write_text((LEVELED % "") + "M.Stop @Ext {\n}\n", encoding="utf-8")
+            output = root / "build"
+            with redirect_stdout(StringIO()) as printed:
+                self.assertEqual(main(["build", str(source), "--output", str(output)]), 1)
+            self.assertIn("m: reaches poc", printed.getvalue())
+            self.assertFalse((output / "m.md").exists())
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main(["build", str(source), "--output", str(output), "--require", "poc"]), 0)
+            self.assertIn("기획 수준: PoC 가능", (output / "m.md").read_text(encoding="utf-8"))
+            with redirect_stdout(StringIO()) as printed:
+                main(["check", str(source), "--format", "json"])
+            records = json.loads(printed.getvalue())
+            self.assertEqual([(r["kind"], r["level"], r["blocking"]) for r in records], [("UNHANDLED", "logical", True), ("UNVERIFIED", "confirmed", False)])
+
+
 if __name__ == "__main__":
     unittest.main()

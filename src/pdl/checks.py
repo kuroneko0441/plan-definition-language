@@ -1082,7 +1082,7 @@ def check_machine(machine: Machine, index: Index) -> list[Finding]:
                 )
     for state in machine.states:
         missing = [event for event in machine.events if (state, event) not in handled]
-        if missing:
+        if missing and state not in machine.terminals:
             findings.append(
                 Finding(
                     "UNHANDLED",
@@ -2024,7 +2024,9 @@ def check_unknowns(module: Module, index: Index) -> list[Finding]:
         imported = module.locate(unknown.line)[0] is not None
         if imported and unknown.identifier not in referenced:
             continue
-        if unknown.policy == "value" and unknown.identifier not in referenced:
+        unreferenced = unknown.policy == "value" and unknown.identifier not in referenced
+        unverified = "provisional" in attributes and attributes.get("verified") != "yes"
+        if unreferenced and not unverified:
             findings.append(
                 Finding(
                     "UNREFERENCED",
@@ -2044,11 +2046,12 @@ def check_unknowns(module: Module, index: Index) -> list[Finding]:
                 findings.append(
                     Finding("UNKNOWN_VALUE", f"unknown {unknown.identifier} has no provisional decision", unknown.line, subject=subject)
                 )
-            elif attributes.get("verified") != "yes":
+            elif unverified:
+                unused = ", and nothing assumes it" if unreferenced else ""
                 findings.append(
                     Finding(
                         "UNVERIFIED",
-                        f"{unknown.identifier} is provisional and unverified",
+                        f"{unknown.identifier} is provisional and unverified{unused}",
                         unknown.line,
                         blocking=False,
                         subject=subject,

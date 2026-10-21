@@ -81,7 +81,8 @@ Account.Fail @Member {
 
 The parts mean:
 
-- `init` names the initial state, and `final` lists the states where the machine ends. `cyclic` marks a machine that returns to its initial state instead of ending.
+- `init` names the initial state, and `final` lists the states where the machine ends. `cyclic` marks a machine that returns to its initial state instead of ending. A final state rejects every event that no clause of it names.
+- `else reject` or `else ignore` at the end of the declaration, with an optional `assuming` list, is the `else` clause of every event of the machine that has no `else` clause of its own.
 - `<Machine>.<Counter> : 0..<max>` declares a counter of the machine, which starts at 0. The maximum is a number or a constant, and the machine is declared before its counters.
 - `<Machine>.<Event> @<actors> { … }` declares an event and the actors or permissions that cause it. One event changes one machine.
 - A clause is `<guard> => <outcome>`. The conjuncts of the guard that compare only the machine itself, with `=`, `!=`, `in`, and any combination of them under `|`, `&`, and `!`, name the states that the clause leaves, and a clause without such a conjunct leaves every state.
@@ -309,7 +310,7 @@ A finding is one hole or one note that the compiler reports about a module, with
 - `INAPPLICABLE`: a rule applies an action to an actor or entity that the action declaration excludes.
 - `UNREACHABLE`: a state cannot be reached from the initial state once guards and counters are applied.
 - `TRAP`: a state cannot reach a final state, or in a cyclic machine cannot return to the initial state.
-- `UNHANDLED`: a state has no clause for an event.
+- `UNHANDLED`: a state that is not final has no clause for an event.
 - `SCENARIO_FAILED`: a run is refused by the machine or ends in a different state than expected.
 - `UNIT_MISMATCH`: a law compares values of different time units, or a formula orders values that are not numbers.
 - `INVARIANT_VIOLATED`: an invariant fails in some reachable combination of machine states, and the message gives the event path.
@@ -324,8 +325,8 @@ A finding is one hole or one note that the compiler reports about a module, with
 
 The non-blocking kinds are notes:
 
-- `UNVERIFIED`: a provisional decision has not been confirmed by the business.
-- `UNREFERENCED`: a declared name that nothing uses, which is an unknown value that no statement or clause assumes, or a permission that no event, clause, or screen requires.
+- `UNVERIFIED`: a provisional decision has not been confirmed by the business. The message also says when nothing assumes the unknown.
+- `UNREFERENCED`: a declared name that nothing uses, which is an unknown value that no statement or clause assumes and that `UNVERIFIED` does not report, or a permission that no event, clause, or screen requires.
 - `LABEL_DIFFERS`: two modules label one name differently.
 
 ## Modules of one plan

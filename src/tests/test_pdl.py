@@ -221,7 +221,7 @@ class SeededHoleTest(unittest.TestCase):
         value = 'module m\nunknown value v { source "x" provisional "1" verified no }'
         self.assertEqual(blocking_kinds(value), Counter())
         kinds = [finding.kind for finding in check(parse_module(value))]
-        self.assertEqual(sorted(kinds), ["UNREFERENCED", "UNVERIFIED"])
+        self.assertEqual(kinds, ["UNVERIFIED"])
 
     def test_value_unknown_without_provisional_decision_blocks(self):
         text = 'module m\nunknown value v { source "x" }'
@@ -331,7 +331,25 @@ class MachineTest(unittest.TestCase):
             "module m\nexternal Ext\nM : {A, B} init A final {B}\n"
             "M.Go @Ext {\nM = A => M' = B\nM = B => ignore\n}\nM.Stop {\n}"
         )
-        self.assertEqual(blocking_kinds(text), Counter({"UNHANDLED": 2}))
+        self.assertEqual(blocking_kinds(text), Counter({"UNHANDLED": 1}))
+
+    def test_a_final_state_rejects_the_events_it_does_not_handle(self):
+        text = "module m\nexternal Ext\nM : {A, B} init A final {B}\nM.Go @Ext {\nM = A => M' = B\n}"
+        self.assertEqual(blocking_kinds(text), Counter())
+
+    def test_a_machine_default_covers_every_event_without_an_else(self):
+        base = (
+            "module m\nexternal Ext\nM : {A, B, C} init A final {C}%s\n"
+            "M.Go @Ext {\nM = A => M' = B\n}\nM.Finish @Ext {\nM = B => M' = C\nM = A => ignore\n}\n"
+            "M.Skip @Ext {\nM = A => M' = C\nelse ignore\n}\n"
+        )
+        self.assertEqual(blocking_kinds(base % ""), Counter({"UNHANDLED": 1}))
+        self.assertEqual(blocking_kinds(base % " else reject"), Counter())
+        handlings = parse_module(base % " else reject").machines[0].handlings
+        self.assertEqual(
+            sorted((h.event, h.state, h.kind) for h in handlings),
+            [("Finish", "*", "reject"), ("Finish", "A", "ignore"), ("Go", "*", "reject"), ("Skip", "*", "ignore")],
+        )
 
     def test_two_targets_for_the_same_event_contradict(self):
         text = (
@@ -442,10 +460,12 @@ class ExtensionTest(unittest.TestCase):
         self.assertEqual(blocking_kinds(bad), Counter({"UNDEFINED": 1}))
 
     def test_unreferenced_value_unknown_is_a_note_and_not_a_hole(self):
-        text = 'module m\nunknown value a { provisional "1" source "s" verified no }'
-        findings = check(parse_module(text))
-        self.assertEqual(sorted(f.kind for f in findings), ["UNREFERENCED", "UNVERIFIED"])
+        text = 'module m\nunknown value a { provisional "1" source "s" verified %s }'
+        findings = check(parse_module(text % "yes"))
+        self.assertEqual([f.kind for f in findings], ["UNREFERENCED"])
         self.assertFalse(any(f.blocking for f in findings))
+        unverified = check(parse_module(text % "no"))
+        self.assertEqual([(f.kind, f.message) for f in unverified], [("UNVERIFIED", "a is provisional and unverified, and nothing assumes it")])
 
     def test_a_formula_statement_names_the_unknowns_it_assumes(self):
         unknown = 'unknown value a { label "기준" provisional "1" source "s" verified no }\n'
@@ -590,7 +610,7 @@ class CapabilityTest(unittest.TestCase):
             shared = root.resolve() / "common.pdl"
             self.assertEqual(located, [("UNVERIFIED", shared, 2), ("UNKNOWN_STRUCTURE", shared, 3)])
             own = [f.kind for f in check(parse_module(common, root / "common.pdl"))]
-            self.assertEqual(sorted(own), ["UNKNOWN_STRUCTURE", "UNREFERENCED", "UNVERIFIED"])
+            self.assertEqual(sorted(own), ["UNKNOWN_STRUCTURE", "UNVERIFIED"])
             self.assertEqual(blocking_kinds(base.replace("import", "#") + "permit X Do R assuming a\n")["UNDEFINED"], 1)
             twice = parse_module('module m\nimport "common.pdl"\nunknown structure b { source "t" }\n', root / "m.pdl")
             self.assertIn("DUPLICATE", [f.kind for f in check(twice)])
@@ -1541,7 +1561,7 @@ class SyntaxTest(unittest.TestCase):
     def test_else_covers_the_states_that_no_clause_names(self):
         text = BOOKING.replace("    Payment = Paid & Booking = Cancelled => Payment' = Refunded\n    else reject", "    Payment = Paid & Booking = Cancelled => Payment' = Refunded")
         counts = self.kinds(text)
-        self.assertEqual(counts["UNHANDLED"], 3)
+        self.assertEqual(counts["UNHANDLED"], 1)
         self.assertEqual(counts["UNCOVERED"], 1)
 
     def test_a_clause_names_its_source_states_as_a_set(self):

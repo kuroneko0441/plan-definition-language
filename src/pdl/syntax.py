@@ -178,6 +178,7 @@ class Parser:
         self.runs: list[Run] = []
         self.texts: list[TextEntry] = []
         self.tags: dict[tuple[str, ...], list] = {}
+        self.defaults: dict[str, Clause] = {}
         self.named_texts: dict[str, int] = {}
         self.shorthands: dict[str, tuple[str, int]] = {}
         for position, token in enumerate(tokens[:-2]):
@@ -430,6 +431,8 @@ class Parser:
             machine.cyclic = True
         elif self.accept("final"):
             machine.terminals = self.braced_words()
+        if self.accept("else"):
+            self.defaults[name] = Clause(line, [], self.outcome(), assumes=self.assumptions())
         module.machines.append(machine)
         module.definitions.append(("machine", name, line))
 
@@ -761,6 +764,9 @@ class Parser:
                 machine.events.append(block.event)
             for clause in block.clauses:
                 self.place(machine, block, clause)
+            default = self.defaults.get(machine.name)
+            if default is not None and all(clause.guard for clause in block.clauses):
+                self.place(machine, block, default)
         for run in self.runs:
             self.place_run(module, run)
 
